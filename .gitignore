@@ -1,0 +1,6 @@
+.env
+.venv
+jar*
+
+build
+*.egg-info
