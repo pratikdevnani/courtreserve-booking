@@ -542,6 +542,9 @@ if __name__ == "__main__":
 
     # Polling loop - check at the top of every 5 minutes (:00, :05, :10, etc.)
     poll_count = 0
+    last_session_refresh = datetime.now()
+    SESSION_REFRESH_INTERVAL = timedelta(minutes=20)  # Refresh sessions every 20 minutes
+
     notify("🤖 CourtReserve bot started - polling for courts")
     print(f"\n\033[36m📡 Starting polling loop (checking every 5 minutes at :00, :05, :10, etc.)...\033[0m")
 
@@ -553,6 +556,17 @@ if __name__ == "__main__":
         now = datetime.now()
         now_str = now.strftime("%H:%M:%S")
         is_top_of_hour = now.second == 0 and now.minute == 0
+
+        # Proactive session refresh every 20 minutes to prevent stale connections
+        if now - last_session_refresh > SESSION_REFRESH_INTERVAL:
+            print(f"\n\033[33m🔄 Refreshing all sessions (20min interval)...\033[0m")
+            for acc_sess in account_sessions:
+                try:
+                    acc_sess.warm_up_session()
+                except Exception as e:
+                    log(f"⚠️  Failed to refresh {acc_sess.email}: {e}", "33")
+            last_session_refresh = now
+            print(f"\033[32m✅ All sessions refreshed\033[0m")
 
         print(f"\n\033[36m🔍 Poll #{poll_count} at {now_str} - Searching for available courts...\033[0m")
 
@@ -578,10 +592,27 @@ if __name__ == "__main__":
                 if available_slots:
                     break  # Found courts, exit retry loop
 
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.ChunkedEncodingError,
+                    ConnectionResetError) as conn_err:
+                # Connection errors - refresh session and retry
+                print(f"\033[33m⚠️  Connection error: {conn_err}\033[0m")
+                log(f"🔄 Refreshing hunt session due to connection error...", "33")
+                try:
+                    hunt_session.ensure_logged_in(force_refresh=True)
+                    print(f"\033[32m✅ Hunt session refreshed\033[0m")
+                except Exception as refresh_err:
+                    print(f"\033[91m❌ Failed to refresh session: {refresh_err}\033[0m")
+
+                if attempt == max_attempts:
+                    print(f"\033[33m⚠️  Max retry attempts reached. Will try again on next poll.\033[0m")
+                    available_slots = []  # Set to empty to continue polling
+
             except Exception as e:
                 log(f"⚠️ Hunt attempt {attempt} failed: {e}", "33")
                 if attempt == max_attempts:
-                    raise  # Re-raise on last attempt
+                    print(f"\033[33m⚠️  Hunt failed after {max_attempts} attempts. Will try again on next poll.\033[0m")
+                    available_slots = []  # Set to empty to continue polling
 
         try:
             if available_slots:
