@@ -134,16 +134,28 @@ def generate_time_slots(base_time_str):
 
 def wait_until_next_check():
     """
-    Wait until the next check time (top of every minute XX:00:00.1).
-    Precise to 0.1 second for maximum speed.
+    Wait until the next check time (top of every 5 minutes: XX:00, XX:05, XX:10, etc).
+    Precise to the exact second for maximum speed.
     """
     now = datetime.now()
 
-    # Calculate next minute boundary
-    next_minute = (now + timedelta(minutes=1)).replace(second=0, microsecond=000000)  # 0.1 second
+    # Calculate next 5-minute boundary (0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55)
+    current_minute = now.minute
+    current_5min_slot = (current_minute // 5) * 5  # Round down to current 5-min slot
+    next_5min_slot = current_5min_slot + 5  # Next 5-min slot
+
+    # Build the next check time
+    if next_5min_slot >= 60:
+        next_check = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    else:
+        next_check = now.replace(minute=next_5min_slot, second=0, microsecond=0)
+
+    # If we've already passed this time (edge case), add 5 minutes
+    if next_check <= now:
+        next_check = next_check + timedelta(minutes=5)
 
     # Calculate exact sleep time
-    sleep_duration = (next_minute - now).total_seconds()
+    sleep_duration = (next_check - now).total_seconds()
 
     if sleep_duration > 0:
         log(f"⏳ Waiting {sleep_duration:.3f}s until next check time...", "90")
@@ -528,13 +540,13 @@ if __name__ == "__main__":
         acc_sess.warm_up_session()
     print(f"\033[32m✅ All sessions ready!\033[0m")
 
-    # Polling loop - check at the top of every minute (:00)
+    # Polling loop - check at the top of every 5 minutes (:00, :05, :10, etc.)
     poll_count = 0
     notify("🤖 CourtReserve bot started - polling for courts")
-    print(f"\n\033[36m📡 Starting polling loop (checking at :00 of every minute)...\033[0m")
+    print(f"\n\033[36m📡 Starting polling loop (checking every 5 minutes at :00, :05, :10, etc.)...\033[0m")
 
     while True:
-        # Wait until next minute boundary
+        # Wait until next 5-minute boundary
         wait_until_next_check()
 
         poll_count += 1
