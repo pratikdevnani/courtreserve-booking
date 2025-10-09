@@ -10,5 +10,5 @@ dependencies = [
     "lxml"
 ]
 
-[project.scripts]
-courtreserve-bot = "book_court:main"
+[tool.setuptools]
+py-modules = ["book_court_sunnyvale", "book_court_santa_clara"]
