@@ -41,6 +41,8 @@ ACCOUNTS = [
 
 DATE  = os.getenv("CR_DATE")           # YYYY-MM-DD (required)
 START = os.getenv("CR_START_TIME")     # HH:MM 24-h (required)
+DURATION = os.getenv("CR_DURATION")    # Duration in minutes (optional)
+SINGLE_SHOT = os.getenv("CR_SINGLE_SHOT") == "1"  # Single attempt mode (for scheduler)
 
 DEBUG      = os.getenv("DEBUG") == "1"
 UA         = "Mozilla/5.0 CourtReserveAuto/2.0 (+https://github.com)"
@@ -478,9 +480,24 @@ def book_slot_for_account(account_session, slot_time, duration, date_str):
                 return True
             else:
                 error_msg = result.get("message", "Unknown error")
+
+                # Check if error is "booking window not open yet" (not a real failure)
+                if "only allowed to reserve up to" in error_msg.lower():
+                    log(f"ℹ️  [{email}] Booking window not open yet: {error_msg}", "36")
+                    print(f"\033[36mℹ️  {email}: Booking window not open yet (too far in advance)\033[0m")
+                    return False  # Don't retry, just treat as unavailable
+
                 raise Exception(f"Booking failed: {error_msg}")
 
         except Exception as e:
+            error_str = str(e)
+
+            # Check if error is "booking window not open yet" (not a real failure)
+            if "only allowed to reserve up to" in error_str.lower():
+                log(f"ℹ️  [{email}] Booking window not open yet: {error_str}", "36")
+                print(f"\033[36mℹ️  {email}: Booking window not open yet (too far in advance)\033[0m")
+                return False  # Don't retry, just treat as unavailable
+
             log(f"⚠️  [{email}] Attempt {attempt}/{max_retries} failed: {e}", "33")
 
             if attempt < max_retries:
@@ -499,10 +516,16 @@ def book_slot_for_account(account_session, slot_time, duration, date_str):
 
 # ─── main orchestration ──────────────────────────────────────────────
 if __name__ == "__main__":
-    # Validate all 3 accounts have credentials
-    for i, account in enumerate(ACCOUNTS, 1):
-        if not all([account["email"], account["password"]]):
-            die(f"Account {i}: Need CR_EMAIL_{i} and CR_PASSWORD_{i} in environment")
+    # In single-shot mode, only use the first account
+    if SINGLE_SHOT:
+        if not all([ACCOUNTS[0]["email"], ACCOUNTS[0]["password"]]):
+            die("Single-shot mode: Need CR_EMAIL_1 and CR_PASSWORD_1 in environment")
+        ACCOUNTS = [ACCOUNTS[0]]  # Use only first account
+    else:
+        # Validate all 3 accounts have credentials
+        for i, account in enumerate(ACCOUNTS, 1):
+            if not all([account["email"], account["password"]]):
+                die(f"Account {i}: Need CR_EMAIL_{i} and CR_PASSWORD_{i} in environment")
 
     if not all([DATE, START]):
         die("Need CR_DATE and CR_START_TIME in environment")
@@ -514,9 +537,13 @@ if __name__ == "__main__":
     time_slots = generate_time_slots(START)
     print(f"\033[36m🕐 Time slots to try (in priority order): {time_slots}\033[0m")
 
-    # Priority durations: 2h, 1.5h, 1h, 30min
-    priority_durations = [120, 90, 60, 30]
-    print(f"\033[36m⏱️  Duration priority: {priority_durations} minutes\033[0m")
+    # Priority durations: use CR_DURATION if specified, otherwise try all
+    if DURATION:
+        priority_durations = [int(DURATION)]
+        print(f"\033[36m⏱️  Using specific duration: {DURATION} minutes\033[0m")
+    else:
+        priority_durations = [120, 90, 60, 30]
+        print(f"\033[36m⏱️  Duration priority: {priority_durations} minutes\033[0m")
 
     # Initialize all account sessions upfront
     print(f"\n\033[33m🔐 Logging in all 3 accounts...\033[0m")
@@ -535,22 +562,25 @@ if __name__ == "__main__":
     hunt_session = account_sessions[0]
 
     # Warm up all sessions ONCE at startup (not in poll loop)
-    print(f"\n\033[33m🔥 Warming up all sessions...\033[0m")
-    for acc_sess in account_sessions:
-        acc_sess.warm_up_session()
-    print(f"\033[32m✅ All sessions ready!\033[0m")
+    if not SINGLE_SHOT:
+        print(f"\n\033[33m🔥 Warming up all sessions...\033[0m")
+        for acc_sess in account_sessions:
+            acc_sess.warm_up_session()
+        print(f"\033[32m✅ All sessions ready!\033[0m")
 
     # Polling loop - check at the top of every 5 minutes (:00, :05, :10, etc.)
     poll_count = 0
     last_session_refresh = datetime.now()
     SESSION_REFRESH_INTERVAL = timedelta(minutes=20)  # Refresh sessions every 20 minutes
 
-    notify("🤖 CourtReserve bot started - polling for courts")
-    print(f"\n\033[36m📡 Starting polling loop (checking every 5 minutes at :00, :05, :10, etc.)...\033[0m")
+    if not SINGLE_SHOT:
+        notify("🤖 CourtReserve bot started - polling for courts")
+        print(f"\n\033[36m📡 Starting polling loop (checking every 5 minutes at :00, :05, :10, etc.)...\033[0m")
 
     while True:
-        # Wait until next 5-minute boundary
-        wait_until_next_check()
+        # Wait until next 5-minute boundary (skip in single-shot mode)
+        if not SINGLE_SHOT:
+            wait_until_next_check()
 
         poll_count += 1
         now = datetime.now()
@@ -682,9 +712,13 @@ if __name__ == "__main__":
                 else:
                     notify(f"⚠️ All {len(account_sessions)} booking attempts failed - courts may be taken")
                     print(f"\033[33m⚠️  All bookings failed (courts may have been taken). Continuing to poll...\033[0m")
+                    if SINGLE_SHOT:
+                        break  # Exit after one attempt in single-shot mode
 
             else:
                 print(f"\033[90m❌ No courts available yet\033[0m")
+                if SINGLE_SHOT:
+                    break  # Exit after one attempt in single-shot mode
 
         except Exception as e:
             print(f"\033[33m⚠️  Error during polling: {e}\033[0m")
@@ -693,3 +727,6 @@ if __name__ == "__main__":
                 hunt_session.ensure_logged_in(force_refresh=False)
             except Exception as login_err:
                 print(f"\033[91m❌ Failed to re-login: {login_err}\033[0m")
+
+            if SINGLE_SHOT:
+                break  # Exit after one attempt in single-shot mode

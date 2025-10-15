@@ -1,0 +1,119 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+// Account used for booking courts
+model Account {
+  id           String        @id @default(cuid())
+  name         String        // Friendly name
+  email        String        @unique
+  password     String        // Plain text (since this is single-user local app)
+  venue        String        // "sunnyvale" or "santa_clara"
+  cookieJar    String?       // Path to cookie jar file
+  active       Boolean       @default(true)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  reservations Reservation[]
+  bookingJobs  BookingJob[]
+}
+
+// Reservation made by the software
+model Reservation {
+  id              String   @id @default(cuid())
+  accountId       String
+  account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  venue           String   // "sunnyvale" or "santa_clara"
+  courtId         String?  // Court ID from CourtReserve
+  date            String   // YYYY-MM-DD
+  startTime       String   // HH:MM
+  duration        Int      // minutes
+
+  // Metadata for tracking
+  bookedAt        DateTime @default(now())
+  externalId      String?  // Reservation ID from CourtReserve (if available)
+  bookingJobId    String?  // Link to the job that created this
+  bookingJob      BookingJob? @relation(fields: [bookingJobId], references: [id], onDelete: SetNull)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([accountId])
+  @@index([date])
+  @@index([bookingJobId])
+}
+
+// Booking job configuration
+model BookingJob {
+  id              String   @id @default(cuid())
+  name            String   // User-friendly name
+  accountId       String   // Which account to use
+  account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  venue           String   // "sunnyvale" or "santa_clara"
+
+  // Job type
+  recurrence      String   // "once" or "weekly"
+  slotMode        String   // "single" or "multi"
+
+  // Days configuration (JSON array)
+  // For single day: ["Monday"] or ["2025-01-15"]
+  // For multi day: ["Monday", "Wednesday", "Friday"] or ["2025-01-15", "2025-01-17"]
+  days            String   // JSON stringified array
+
+  // Time slots (JSON array of HH:MM strings)
+  // For single slot: picks first available from list
+  // For multi slot: books one per day
+  timeSlots       String   // JSON stringified array ["18:00", "18:30", "19:00"]
+
+  // Duration preferences (JSON array in minutes)
+  durations       String   @default("[120, 90, 60, 30]") // JSON stringified array
+
+  // Status
+  active          Boolean  @default(true)
+  lastRun         DateTime?
+  nextRun         DateTime?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  reservations    Reservation[]
+  runHistory      BookingRunHistory[]
+
+  @@index([accountId])
+  @@index([active])
+  @@index([nextRun])
+}
+
+// Booking run history - tracks each execution attempt
+model BookingRunHistory {
+  id              String   @id @default(cuid())
+  bookingJobId    String
+  bookingJob      BookingJob @relation(fields: [bookingJobId], references: [id], onDelete: Cascade)
+
+  startedAt       DateTime @default(now())
+  completedAt     DateTime?
+  status          String   // "success", "partial", "failed", "no_courts"
+  
+  // Detailed results per target date
+  attempts        String   // JSON: [{ date, timeSlot, success, message, courtId?, duration? }]
+  
+  successCount    Int      @default(0)
+  failureCount    Int      @default(0)
+  
+  errorMessage    String?  // If the entire run failed
+  
+  createdAt       DateTime @default(now())
+
+  @@index([bookingJobId])
+  @@index([startedAt])
+}
