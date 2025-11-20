@@ -272,6 +272,25 @@ function generateTargetDates(job: BookingJob, weeksAhead: number = 2): Date[] {
 }
 
 /**
+ * Check if a reservation already exists for a given date and account
+ * (regardless of time - checks if ANY reservation exists for this day)
+ */
+async function hasExistingReservationForDate(
+  accountId: string,
+  venue: string,
+  date: string
+): Promise<boolean> {
+  const existing = await prisma.reservation.findFirst({
+    where: {
+      accountId,
+      venue,
+      date,
+    },
+  })
+  return existing !== null
+}
+
+/**
  * Process a single booking job
  */
 export async function processBookingJob(job: BookingJob): Promise<void> {
@@ -323,6 +342,25 @@ export async function processBookingJob(job: BookingJob): Promise<void> {
     console.log(`[Scheduler] Attempting booking for: ${format(targetDate, 'yyyy-MM-dd (EEEE)')}`)
     const dateStr = format(targetDate, 'yyyy-MM-dd')
     let bookedForThisDate = false
+
+    // Check if we already have a reservation for this date (at any time)
+    const alreadyBooked = await hasExistingReservationForDate(
+      job.accountId,
+      job.venue,
+      dateStr
+    )
+
+    if (alreadyBooked) {
+      console.log(`[Scheduler] ⏭️  Skipping ${dateStr} - already have a reservation for this day`)
+      attempts.push({
+        date: dateStr,
+        timeSlot: 'any',
+        success: true,
+        message: 'Already booked (skipped)',
+      })
+      bookedForThisDate = true
+      continue // Move to next date
+    }
 
     if (job.slotMode === 'single') {
       // Single slot mode: try to book first available slot for this date
@@ -468,18 +506,49 @@ export async function processBookingJob(job: BookingJob): Promise<void> {
   }
 
   // Update job's lastRun and nextRun
-  // Set nextRun to the last target date + 1 week for weekly recurring jobs
-  const nextRun = job.recurrence === 'weekly'
-    ? addWeeks(targetDates[targetDates.length - 1], 1)
-    : null
+  const now = new Date()
+  let nextRun: Date | null = null
+  let active = job.active
+
+  if (job.recurrence === 'weekly') {
+    // Weekly jobs run daily at noon Pacific Time - set nextRun to next noon (12:00 PM PT)
+    // Get current time in Pacific timezone
+    const nowPacific = new Date(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }))
+    const nextNoon = new Date(nowPacific)
+    nextNoon.setHours(12, 0, 0, 0)
+
+    // If it's already past noon today (Pacific Time), set to noon tomorrow
+    if (nowPacific >= nextNoon) {
+      nextRun = addDays(nextNoon, 1)
+    } else {
+      nextRun = nextNoon
+    }
+
+    // Convert back to UTC for storage
+    const offset = now.getTime() - nowPacific.getTime()
+    nextRun = new Date(nextRun.getTime() + offset)
+  } else if (job.recurrence === 'once') {
+    // Once jobs: if we successfully booked, mark as inactive
+    if (totalBookings > 0) {
+      active = false
+      nextRun = null
+      console.log(`[Scheduler] 'Once' job completed successfully - marking as inactive`)
+    } else {
+      // Try again tomorrow if booking failed
+      nextRun = addDays(now, 1)
+    }
+  }
 
   await prisma.bookingJob.update({
     where: { id: job.id },
     data: {
-      lastRun: new Date(),
+      lastRun: now,
       nextRun,
+      active,
     },
   })
+
+  console.log(`[Scheduler] Updated job: lastRun=${now.toISOString()}, nextRun=${nextRun?.toISOString()}, active=${active}`)
 }
 
 /**

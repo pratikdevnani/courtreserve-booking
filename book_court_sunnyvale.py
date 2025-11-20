@@ -710,7 +710,7 @@ if __name__ == "__main__":
                     # At least one booking succeeded
                     break
                 else:
-                    notify(f"⚠️ All {len(account_sessions)} booking attempts failed - courts may be taken")
+                    # notify(f"⚠️ All {len(account_sessions)} booking attempts failed - courts may be taken")
                     print(f"\033[33m⚠️  All bookings failed (courts may have been taken). Continuing to poll...\033[0m")
                     if SINGLE_SHOT:
                         break  # Exit after one attempt in single-shot mode

@@ -10,9 +10,9 @@ import cron from 'node-cron'
 import { runScheduler } from '../lib/scheduler'
 
 console.log('🚀 Court Booking Scheduler starting...')
-console.log('⏰ Scheduler will run every day at noon (12:00 PM)')
+console.log('⏰ Scheduler will run every day at noon (12:00 PM Pacific Time)')
 
-// Run scheduler every day at noon
+// Run scheduler every day at noon Pacific Time
 cron.schedule('0 12 * * *', async () => {
   console.log(`\n[${ new Date().toISOString()}] Running scheduler...`)
   try {
@@ -20,6 +20,8 @@ cron.schedule('0 12 * * *', async () => {
   } catch (error) {
     console.error('Scheduler error:', error)
   }
+}, {
+  timezone: 'America/Los_Angeles'
 })
 
 // Also run on startup
