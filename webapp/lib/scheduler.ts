@@ -187,8 +187,8 @@ export async function executeBookingScript(
         !fullOutput.includes('❌ No courts available')
       )
 
-      // Try to extract court ID from output
-      const courtMatch = fullOutput.match(/court (\d+)/i)
+      // Try to extract court ID from output (handle ANSI color codes)
+      const courtMatch = fullOutput.match(/Booked court (\d+)/i)
       const courtId = courtMatch ? courtMatch[1] : undefined
 
       console.log(`[Scheduler] Python script exited with code ${code}`)
@@ -396,12 +396,18 @@ export async function processBookingJob(job: BookingJob): Promise<void> {
           bookedForThisDate = true
           break // Move to next date after successful booking
         } else {
-          // Extract meaningful error message from output
+          // Extract meaningful error message from output and handle booking window errors
           let message = 'No courts available'
-          if (result.output.includes('Booking window not open yet')) {
+          let isBookingWindowError = false
+          
+          if (result.output.includes('Booking window not open yet') || 
+              result.output.includes('only allowed to reserve up to')) {
             message = 'Booking window not open yet'
+            isBookingWindowError = true
           } else if (result.output.includes('already used')) {
             message = 'All courts already attempted'
+          } else if (result.output.includes('Sorry, no available courts')) {
+            message = 'No courts available (race condition or fully booked)'
           }
 
           attempts.push({
@@ -410,6 +416,12 @@ export async function processBookingJob(job: BookingJob): Promise<void> {
             success: false,
             message,
           })
+
+          // For booking window errors, don't continue trying other time slots for this date
+          if (isBookingWindowError) {
+            console.log(`[Scheduler] ⏰ Booking window not open for ${dateStr} - will retry on next run`)
+            break
+          }
         }
       }
     } else {
@@ -445,11 +457,18 @@ export async function processBookingJob(job: BookingJob): Promise<void> {
           bookedForThisDate = true
           break // Move to next date after successful booking
         } else {
+          // Extract meaningful error message from output and handle booking window errors
           let message = 'No courts available'
-          if (result.output.includes('Booking window not open yet')) {
+          let isBookingWindowError = false
+          
+          if (result.output.includes('Booking window not open yet') || 
+              result.output.includes('only allowed to reserve up to')) {
             message = 'Booking window not open yet'
+            isBookingWindowError = true
           } else if (result.output.includes('already used')) {
             message = 'All courts already attempted'
+          } else if (result.output.includes('Sorry, no available courts')) {
+            message = 'No courts available (race condition or fully booked)'
           }
 
           attempts.push({
@@ -458,6 +477,12 @@ export async function processBookingJob(job: BookingJob): Promise<void> {
             success: false,
             message,
           })
+
+          // For booking window errors, don't continue trying other time slots for this date
+          if (isBookingWindowError) {
+            console.log(`[Scheduler] ⏰ Booking window not open for ${dateStr} - will retry on next run`)
+            break
+          }
         }
       }
     }
@@ -477,12 +502,14 @@ export async function processBookingJob(job: BookingJob): Promise<void> {
 
   // Determine overall status
   let status: string
+  const hasBookingWindowErrors = attempts.some(a => a.message.includes('Booking window not open'))
+  
   if (totalBookings === targetDates.length) {
     status = 'success'
   } else if (totalBookings > 0) {
     status = 'partial'
-  } else if (attempts.some(a => a.message.includes('Booking window not open'))) {
-    status = 'no_courts'
+  } else if (hasBookingWindowErrors) {
+    status = 'booking_window_closed'  // Special status for booking window errors
   } else {
     status = 'no_courts'
   }
@@ -515,13 +542,21 @@ export async function processBookingJob(job: BookingJob): Promise<void> {
     // Get current time in Pacific timezone
     const nowPacific = new Date(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }))
     const nextNoon = new Date(nowPacific)
-    nextNoon.setHours(12, 0, 0, 0)
-
-    // If it's already past noon today (Pacific Time), set to noon tomorrow
-    if (nowPacific >= nextNoon) {
-      nextRun = addDays(nextNoon, 1)
+    
+    // For booking window errors, try again in 1 hour (courts may open later)
+    if (status === 'booking_window_closed') {
+      nextRun = addDays(nowPacific, 1)  // Try again tomorrow at same time
+      nextRun.setHours(12, 0, 0, 0)   // But set to noon for precision
     } else {
-      nextRun = nextNoon
+      // Normal scheduling - run at noon daily
+      nextNoon.setHours(12, 0, 0, 0)
+
+      // If it's already past noon today (Pacific Time), set to noon tomorrow
+      if (nowPacific >= nextNoon) {
+        nextRun = addDays(nextNoon, 1)
+      } else {
+        nextRun = nextNoon
+      }
     }
 
     // Convert back to UTC for storage

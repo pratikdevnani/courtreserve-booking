@@ -105,20 +105,37 @@ def generate_time_slots(base_time_str):
 
 def wait_until_next_check():
     """
-    Wait until the next check time (top of every minute XX:00:00.1).
-    Precise to 0.1 second for maximum speed.
+    Wait until the next check time (top of every minute XX:00:00.0).
+    Ultra-precise timing for booking window openings.
     """
     now = datetime.now()
 
-    # Calculate next minute boundary
-    next_minute = (now + timedelta(minutes=1)).replace(second=0, microsecond=000000)  # 0.1 second
+    # For noon hour (11:58-12:02), poll every 10 seconds for maximum precision
+    if 11 <= now.hour <= 12:
+        # Calculate next 10-second boundary
+        seconds_remainder = now.second % 10
+        if seconds_remainder == 0 and now.microsecond < 100000:
+            return  # Already at boundary
+            
+        next_check = now.replace(microsecond=0)
+        if seconds_remainder == 0:
+            next_check = next_check + timedelta(seconds=10)
+        else:
+            next_check = next_check.replace(second=now.second - seconds_remainder + 10)
+            
+        sleep_duration = (next_check - now).total_seconds()
+        
+        if sleep_duration > 0:
+            log(f"⏳ HIGH-PRECISION WAIT: {sleep_duration:.3f}s until next check (noon window)...", "33")
+            time.sleep(sleep_duration)
+    else:
+        # Normal timing - check every minute
+        next_minute = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
+        sleep_duration = (next_minute - now).total_seconds()
 
-    # Calculate exact sleep time
-    sleep_duration = (next_minute - now).total_seconds()
-
-    if sleep_duration > 0:
-        log(f"⏳ Waiting {sleep_duration:.3f}s until next check time...", "90")
-        time.sleep(sleep_duration)
+        if sleep_duration > 0:
+            log(f"⏳ Waiting {sleep_duration:.3f}s until next check time...", "90")
+            time.sleep(sleep_duration)
 
 # ─── CourtReserve API wrappers ────────────────────────────────────────────
 def api_get(sess, url, **kw):
@@ -185,13 +202,72 @@ def calc_end_local(start_time_str, dur_minutes):
     end_dt = start_dt + timedelta(minutes=dur_minutes)
     return end_dt.strftime("%-I:%M %p").lstrip('0')
 
-# 4️⃣ Hunt for available courts across all time slots and durations
+# 4️⃣ Hunt for available courts and book immediately (optimized for speed)
+def hunt_and_book_immediately(account_session, time_slots, date_disp, priority_durations=[120, 90, 60, 30]):
+    """
+    Hunt for available courts and book IMMEDIATELY when found to win race conditions.
+    Returns True if booking successful, False otherwise.
+    Only books ONE court per run respecting time slot and duration preferences.
+    """
+    attempted_courts = set()  # Track courts we've tried to avoid infinite retries
+
+    def try_book_slot(slot, dur):
+        """Try to book a specific slot/duration immediately when courts are found."""
+        slot_dt = datetime.strptime(slot, "%H:%M")
+        slot_24 = slot_dt.strftime("%H:%M:%S")
+        slot_disp = slot_dt.strftime("%-I:%M:%S %p").replace(" 0", " ")
+
+        end_dt = slot_dt + timedelta(minutes=dur)
+        end_disp = end_dt.strftime("%-I:%M %p")
+
+        try:
+            # Fast court discovery
+            if PINNED_COURT:
+                courts = [{"Id": int(PINNED_COURT)}]
+            else:
+                courts = fetch_courts(account_session.get_session(), dur, slot_24, end_disp, date_disp)
+
+            for court_data in courts:
+                court_id = court_data["Id"]
+                
+                # Skip courts we've already tried and failed
+                court_key = f"{slot}-{dur}-{court_id}"
+                if court_key in attempted_courts:
+                    continue
+                    
+                attempted_courts.add(court_key)
+                
+                log(f"🎯 IMMEDIATE BOOKING ATTEMPT: Court {court_id} at {slot} for {dur}min", "33")
+                
+                # Book immediately - no delay
+                success = book_slot_for_account(account_session, slot, dur, court_id, date_disp)
+                
+                if success:
+                    print(f"\033[32m🚀 INSTANT BOOKING SUCCESS: {account_session.email} got court {court_id} at {slot} for {dur}min\033[0m")
+                    return True  # SUCCESS - Got our one booking!
+                else:
+                    log(f"⚠️  Booking failed for court {court_id}, trying next...", "33")
+                        
+        except Exception as e:
+            log(f"⚠️  Error checking {slot} for {dur}min: {e}", "33")
+            
+        return False
+
+    # Try each duration/slot combination until we get ONE booking
+    for dur in priority_durations:
+        log(f"🔍 Trying {dur}min duration across time slots (looking for ONE court only)...", "33")
+        
+        for slot in time_slots:
+            if try_book_slot(slot, dur):
+                return True  # SUCCESS - Got our one booking!
+                
+    return False  # No booking made
+
+# 4️⃣ Legacy hunt function (kept for compatibility)
 def hunt_available_slots(sess, time_slots, date_disp, priority_durations=[120, 90, 60, 30], max_courts=3):
     """
-    Hunt for available courts by trying durations in priority order across all time slots.
-    Returns a list of (slot_time, duration, court_id) tuples for available courts.
-    Priority: try 2h across all slots, then 1.5h, then 1h, then 30min.
-    Stops after finding max_courts for performance.
+    Legacy hunt function - discovers courts without booking.
+    Use hunt_and_book_immediately() for better performance.
     """
     def check_slot(slot, dur):
         """Check a single slot/duration combination. Returns list of (slot, dur, court_id) tuples."""
@@ -220,23 +296,16 @@ def hunt_available_slots(sess, time_slots, date_disp, priority_durations=[120, 9
     available = []
 
     for dur in priority_durations:
-        log(f"🔍 Trying duration {dur} minutes across all time slots in parallel...", "33")
+        log(f"🔍 Trying duration {dur} minutes across all time slots...", "33")
 
-        # Check all slots in parallel for this duration
-        with ThreadPoolExecutor(max_workers=len(time_slots)) as executor:
-            futures = {executor.submit(check_slot, slot, dur): slot for slot in time_slots}
-
-            for future in as_completed(futures):
-                courts = future.result()
-                available.extend(courts)
-
-                # OPTIMIZATION: Stop early if we have enough courts
-                if len(available) >= max_courts:
-                    log(f"⚡ Found {len(available)} courts - stopping search for speed!", "32")
-                    # Cancel remaining futures
-                    for f in futures:
-                        f.cancel()
-                    return available[:max_courts]
+        for slot in time_slots:
+            courts = check_slot(slot, dur)
+            available.extend(courts)
+            
+            # Stop early if we have enough courts
+            if len(available) >= max_courts:
+                log(f"⚡ Found {len(available)} courts - stopping search!", "32")
+                return available[:max_courts]
 
         # If we found any courts at this duration, return them
         if available:
@@ -508,77 +577,35 @@ if __name__ == "__main__":
                 time.sleep(0.5)  # Brief pause between retries
 
             try:
-                # Hunt for available courts using first account's session
-                # Only need to find as many courts as we have accounts
-                available_slots = hunt_available_slots(
-                    hunt_session.get_session(),
+                # Use optimized immediate booking function (books ONE court only)
+                print(f"\033[33m🚀 Using INSTANT BOOKING mode (hunt + book immediately)...\033[0m")
+                booking_success = hunt_and_book_immediately(
+                    account_sessions[0],  # Use first account only
                     time_slots,
                     DATE_disp,
-                    priority_durations,
-                    max_courts=len(account_sessions)
+                    priority_durations
                 )
-
-                if available_slots:
-                    break  # Found courts, exit retry loop
+                
+                if booking_success:
+                    break  # Successfully booked, exit retry loop
 
             except Exception as e:
-                log(f"⚠️ Hunt attempt {attempt} failed: {e}", "33")
+                log(f"⚠️ Instant booking attempt {attempt} failed: {e}", "33")
                 if attempt == max_attempts:
                     raise  # Re-raise on last attempt
 
         try:
-
-            if available_slots:
-                print(f"\033[32m✅ Found {len(available_slots)} available court(s)!\033[0m")
-
-                # Notify via ntfy.sh
-                notify(f"🎾 Found {len(available_slots)} courts! Starting booking...")
-
-                # Display what we found
-                for slot, dur, court in available_slots:
-                    print(f"   - Court {court} at {slot} for {dur}min")
-
-                # Assign courts to accounts (up to 3 courts, one per account)
-                assignments = []
-                for i, (slot_time, duration, court_id) in enumerate(available_slots[:3]):
-                    acc_sess = account_sessions[i]
-                    assignments.append((acc_sess, slot_time, duration, court_id))
-
-                print(f"\n\033[33m📋 Booking assignments:\033[0m")
-                for acc_sess, slot_time, duration, court_id in assignments:
-                    print(f"   {acc_sess.email}: Court {court_id} at {slot_time} for {duration}min")
-
-                # Book in parallel
-                print(f"\n\033[33m🚀 Starting parallel bookings...\033[0m")
-                with ThreadPoolExecutor(max_workers=3) as executor:
-                    futures = []
-                    for acc_sess, slot_time, duration, court_id in assignments:
-                        future = executor.submit(
-                            book_slot_for_account,
-                            acc_sess, slot_time, duration, court_id, DATE_disp
-                        )
-                        futures.append(future)
-
-                    # Wait for all bookings to complete
-                    results = [future.result() for future in as_completed(futures)]
-
-                # Summary
-                success_count = sum(results)
-                print(f"\n\033[32m{'='*60}\033[0m")
-                print(f"\033[32m🎉 Booking complete: {success_count}/{len(assignments)} successful\033[0m")
+            # Summary
+            print(f"\n\033[32m{'='*60}\033[0m")
+            if booking_success:
+                print(f"\033[32m🎉 Booking complete: 1/1 successful\033[0m")
                 print(f"\033[32m{'='*60}\033[0m")
-
-                # Notify results
-                if success_count > 0:
-                    slots_booked = [f"{assignments[i][1]} ({assignments[i][2]}min)" for i, success in enumerate(results) if success]
-                    notify(f"✅ Booked {success_count}/{len(assignments)} courts: {', '.join(slots_booked)}")
-                else:
-                    notify(f"⚠️ All {len(assignments)} booking attempts failed")
-
+                notify(f"✅ Successfully booked 1 court using INSTANT BOOKING!")
                 break
-
             else:
-                print(f"\033[90m❌ No courts available yet\033[0m")
+                print(f"\033[32m🎉 Booking complete: 0/1 successful\033[0m")
+                print(f"\033[32m{'='*60}\033[0m")
+                print(f"\033[33m⚠️  All bookings failed (courts may have been taken). Continuing to poll...\033[0m")
                 if SINGLE_SHOT:
                     break  # Exit after one attempt in single-shot mode
 
