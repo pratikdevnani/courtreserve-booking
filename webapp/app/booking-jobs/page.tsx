@@ -1,6 +1,9 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import TimePreferencePicker from './components/TimePreferencePicker'
+import DurationRangePicker from './components/DurationRangePicker'
+import SchedulerStatus from './components/SchedulerStatus'
 
 type Account = {
   id: string
@@ -16,13 +19,23 @@ type BookingJob = {
   accountId: string
   venue: string
   recurrence: string
-  slotMode: string
   days: string
-  timeSlots: string
-  durations: string
   active: boolean
   lastRun?: string
   nextRun?: string
+  // New schema fields
+  preferredTime?: string | null
+  timeFlexibility?: number | null
+  preferredDuration?: number | null
+  minDuration?: number | null
+  strictDuration?: boolean | null
+  maxBookingsPerDay?: number | null
+  priority?: number | null
+  // Legacy fields (backward compat)
+  slotMode?: string | null
+  timeSlots?: string | null
+  durations?: string | null
+  // Relations
   account: {
     id: string
     name: string
@@ -61,23 +74,25 @@ export default function BookingJobsPage() {
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
 
-  // Form state
+  // Form state with new schema
   const [formData, setFormData] = useState({
     name: '',
     accountId: '',
     venue: 'sunnyvale',
     recurrence: 'once',
-    slotMode: 'single',
     days: [] as string[],
-    timeSlots: [] as string[],
-    durations: [120, 90, 60, 30],
     active: true,
+    // New schema fields
+    preferredTime: '18:00',
+    timeFlexibility: 30,
+    preferredDuration: 120,
+    minDuration: 60,
+    strictDuration: false,
+    maxBookingsPerDay: 1,
+    priority: 0,
   })
 
   const [newDay, setNewDay] = useState('')
-  const [newTimeSlot, setNewTimeSlot] = useState('')
-  const [newDuration, setNewDuration] = useState<number>(120) // Default 2 hours
-  const [dayInputMode, setDayInputMode] = useState<'weekday' | 'date'>('weekday')
   const [runningScheduler, setRunningScheduler] = useState(false)
   const [selectedJobHistory, setSelectedJobHistory] = useState<string | null>(null)
   const [runHistory, setRunHistory] = useState<BookingRunHistory[]>([])
@@ -113,13 +128,25 @@ export default function BookingJobsPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
 
+    // Validate required fields
+    if (!formData.name.trim()) {
+      alert('Please enter a job name')
+      return
+    }
+    if (!formData.accountId) {
+      alert('Please select an account')
+      return
+    }
     if (formData.days.length === 0) {
       alert('Please add at least one day')
       return
     }
-
-    if (formData.timeSlots.length === 0) {
-      alert('Please add at least one time slot')
+    if (!formData.preferredTime || !/^\d{2}:\d{2}$/.test(formData.preferredTime)) {
+      alert('Please enter a valid preferred time (HH:MM)')
+      return
+    }
+    if (formData.minDuration > formData.preferredDuration) {
+      alert('Minimum duration cannot exceed preferred duration')
       return
     }
 
@@ -147,17 +174,47 @@ export default function BookingJobsPage() {
   }
 
   const handleEdit = (job: BookingJob) => {
-    setFormData({
-      name: job.name,
-      accountId: job.accountId,
-      venue: job.venue,
-      recurrence: job.recurrence,
-      slotMode: job.slotMode,
-      days: JSON.parse(job.days),
-      timeSlots: JSON.parse(job.timeSlots),
-      durations: JSON.parse(job.durations),
-      active: job.active,
-    })
+    // Detect if job uses new schema
+    const hasNewSchema = job.preferredTime !== null && job.preferredTime !== undefined
+
+    if (hasNewSchema) {
+      setFormData({
+        name: job.name,
+        accountId: job.accountId,
+        venue: job.venue,
+        recurrence: job.recurrence,
+        days: JSON.parse(job.days),
+        active: job.active,
+        preferredTime: job.preferredTime!,
+        timeFlexibility: job.timeFlexibility ?? 30,
+        preferredDuration: job.preferredDuration ?? 120,
+        minDuration: job.minDuration ?? 60,
+        strictDuration: job.strictDuration ?? false,
+        maxBookingsPerDay: job.maxBookingsPerDay ?? 1,
+        priority: job.priority ?? 0,
+      })
+    } else {
+      // Legacy job - convert to new schema for editing
+      const timeSlots = job.timeSlots ? (JSON.parse(job.timeSlots) as string[]) : ['18:00']
+      const durations = job.durations ? (JSON.parse(job.durations) as number[]) : [120]
+
+      setFormData({
+        name: job.name,
+        accountId: job.accountId,
+        venue: job.venue,
+        recurrence: job.recurrence,
+        days: JSON.parse(job.days),
+        active: job.active,
+        preferredTime: timeSlots[0]?.split('-')[0] || '18:00',
+        timeFlexibility: timeSlots.length > 1 ? 30 : 0,
+        preferredDuration: durations[0] || 120,
+        minDuration: durations[durations.length - 1] || 60,
+        strictDuration: durations.length === 1,
+        maxBookingsPerDay: 1,
+        priority: 0,
+      })
+    }
+
     setEditingId(job.id)
     setShowForm(true)
   }
@@ -182,19 +239,22 @@ export default function BookingJobsPage() {
     }
   }
 
-  const handleRunScheduler = async () => {
-    if (!confirm('This will attempt to book all active booking jobs now. Continue?')) {
-      return
-    }
-
+  const handleRunScheduler = async (mode: 'noon' | 'polling' | 'both') => {
     setRunningScheduler(true)
 
     try {
-      const res = await fetch('/api/scheduler/run', { method: 'POST' })
+      const res = await fetch(`/api/scheduler/run?mode=${mode}`, { method: 'POST' })
       const data = await res.json()
 
       if (data.success) {
-        alert(`Scheduler executed successfully!\n\nCheck the reservations page to see any new bookings.`)
+        const totals = data.totals || { success: 0, failed: 0, skipped: 0 }
+        alert(
+          `Scheduler (${mode}) completed!\n\n` +
+            `Success: ${totals.success}\n` +
+            `Failed: ${totals.failed}\n` +
+            `Skipped: ${totals.skipped}\n\n` +
+            `Check the reservations page to see any new bookings.`
+        )
         await fetchBookingJobs() // Refresh to see updated lastRun times
       } else {
         alert(`Scheduler failed: ${data.error}`)
@@ -269,15 +329,17 @@ export default function BookingJobsPage() {
       accountId: '',
       venue: 'sunnyvale',
       recurrence: 'once',
-      slotMode: 'single',
       days: [],
-      timeSlots: [],
-      durations: [120, 90, 60, 30],
       active: true,
+      preferredTime: '18:00',
+      timeFlexibility: 30,
+      preferredDuration: 120,
+      minDuration: 60,
+      strictDuration: false,
+      maxBookingsPerDay: 1,
+      priority: 0,
     })
     setNewDay('')
-    setNewTimeSlot('')
-    setNewDuration(120)
   }
 
   const addDay = () => {
@@ -288,43 +350,64 @@ export default function BookingJobsPage() {
   }
 
   const removeDay = (day: string) => {
-    setFormData({ ...formData, days: formData.days.filter(d => d !== day) })
+    setFormData({ ...formData, days: formData.days.filter((d) => d !== day) })
   }
 
-  const addTimeSlot = () => {
-    if (newTimeSlot) {
-      // Combine time and duration in format "HH:MM-DURATION"
-      const timeSlotWithDuration = `${newTimeSlot}-${newDuration}`
-      if (!formData.timeSlots.includes(timeSlotWithDuration)) {
-        setFormData({ ...formData, timeSlots: [...formData.timeSlots, timeSlotWithDuration].sort() })
-        setNewTimeSlot('')
-        setNewDuration(120) // Reset to default
+  // Format time for display (12-hour format)
+  const formatTime12Hour = (time24: string): string => {
+    const [hours, minutes] = time24.split(':').map(Number)
+    const period = hours >= 12 ? 'PM' : 'AM'
+    const hours12 = hours === 0 ? 12 : hours > 12 ? hours - 12 : hours
+    return `${hours12}:${minutes.toString().padStart(2, '0')} ${period}`
+  }
+
+  // Format duration for display
+  const formatDuration = (minutes: number): string => {
+    if (minutes < 60) return `${minutes}min`
+    const hours = Math.floor(minutes / 60)
+    const mins = minutes % 60
+    return mins === 0 ? `${hours}hr` : `${hours}hr ${mins}min`
+  }
+
+  // Get job display info
+  const getJobTimeDisplay = (job: BookingJob): string => {
+    if (job.preferredTime) {
+      let display = formatTime12Hour(job.preferredTime)
+      if (job.timeFlexibility && job.timeFlexibility > 0) {
+        display += ` (±${job.timeFlexibility}min)`
       }
+      return display
+    }
+    // Legacy format
+    try {
+      const timeSlots = JSON.parse(job.timeSlots || '[]') as string[]
+      return timeSlots.length > 0 ? `${timeSlots.length} slots` : 'Not set'
+    } catch {
+      return 'Invalid'
     }
   }
 
-  const removeTimeSlot = (slot: string) => {
-    setFormData({ ...formData, timeSlots: formData.timeSlots.filter(s => s !== slot) })
-  }
-
-  // Format time slot for display: "18:00-120" -> "18:00 (2h)"
-  const formatTimeSlot = (slot: string) => {
-    const [time, duration] = slot.split('-')
-
-    // Backward compatibility: if no duration, just return the time
-    if (!duration) {
-      return time
+  const getJobDurationDisplay = (job: BookingJob): string => {
+    if (job.preferredDuration) {
+      let display = formatDuration(job.preferredDuration)
+      if (!job.strictDuration && job.minDuration && job.minDuration < job.preferredDuration) {
+        display += ` → ${formatDuration(job.minDuration)}`
+      }
+      return display
     }
-
-    const durationMins = parseInt(duration)
-    const hours = durationMins / 60
-    const displayDuration = hours >= 1
-      ? hours % 1 === 0 ? `${hours}h` : `${hours}h`
-      : `${durationMins}min`
-    return `${time} (${displayDuration})`
+    // Legacy format
+    try {
+      const durations = JSON.parse(job.durations || '[]') as number[]
+      return durations.length > 0 ? durations.map(formatDuration).join(', ') : 'Not set'
+    } catch {
+      return 'Invalid'
+    }
   }
 
   const weekdays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+
+  // Determine if we should show weekday picker or date picker based on recurrence
+  const showWeekdayPicker = formData.recurrence === 'weekly'
 
   if (loading) {
     return <div className="text-center py-12 text-gray-300">Loading...</div>
@@ -338,18 +421,8 @@ export default function BookingJobsPage() {
           <p className="mt-2 text-sm text-gray-300">
             Manage automated booking jobs (one-time or recurring)
           </p>
-          <p className="mt-1 text-xs text-gray-500">
-            Scheduler runs automatically every day at noon (12:00 PM). You can also trigger it manually below.
-          </p>
         </div>
-        <div className="mt-4 sm:mt-0 sm:ml-16 sm:flex-none flex gap-2">
-          <button
-            onClick={handleRunScheduler}
-            disabled={runningScheduler}
-            className="block rounded-md bg-yellow-600 px-3 py-2 text-center text-sm font-semibold text-white shadow-sm hover:bg-yellow-500 disabled:bg-gray-600 disabled:cursor-not-allowed"
-          >
-            {runningScheduler ? 'Running...' : '▶ Run Now'}
-          </button>
+        <div className="mt-4 sm:mt-0 sm:ml-16 sm:flex-none">
           <button
             onClick={() => setShowForm(true)}
             className="block rounded-md bg-green-600 px-3 py-2 text-center text-sm font-semibold text-white shadow-sm hover:bg-green-500"
@@ -359,12 +432,18 @@ export default function BookingJobsPage() {
         </div>
       </div>
 
+      {/* Scheduler Status */}
+      <div className="mt-6">
+        <SchedulerStatus onRunScheduler={handleRunScheduler} isRunning={runningScheduler} />
+      </div>
+
       {showForm && (
         <div className="mt-8 bg-gray-800 shadow rounded-lg p-6">
           <h2 className="text-lg font-medium text-gray-100 mb-4">
             {editingId ? 'Edit Booking Job' : 'New Booking Job'}
           </h2>
           <form onSubmit={handleSubmit} className="space-y-6">
+            {/* Basic Info */}
             <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
               <div>
                 <label className="block text-sm font-medium text-gray-300">Job Name</label>
@@ -411,80 +490,33 @@ export default function BookingJobsPage() {
                 <label className="block text-sm font-medium text-gray-300">Recurrence</label>
                 <select
                   value={formData.recurrence}
-                  onChange={(e) => setFormData({ ...formData, recurrence: e.target.value })}
+                  onChange={(e) => {
+                    const newRecurrence = e.target.value
+                    // Clear days when switching recurrence type
+                    setFormData({ ...formData, recurrence: newRecurrence, days: [] })
+                    setNewDay('')
+                  }}
                   className="mt-1 block w-full rounded-md bg-gray-700 border-gray-600 text-gray-100 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm px-3 py-2 border"
                 >
-                  <option value="once">Once</option>
-                  <option value="weekly">Weekly (Recurring)</option>
+                  <option value="once">Once (specific date)</option>
+                  <option value="weekly">Weekly (recurring)</option>
                 </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-300">Slot Mode</label>
-                <select
-                  value={formData.slotMode}
-                  onChange={(e) => setFormData({ ...formData, slotMode: e.target.value })}
-                  className="mt-1 block w-full rounded-md bg-gray-700 border-gray-600 text-gray-100 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm px-3 py-2 border"
-                >
-                  <option value="single">Single Slot (first available)</option>
-                  <option value="multi">Multi Slot (one per day)</option>
-                </select>
-                <p className="mt-1 text-xs text-gray-400">
-                  {formData.slotMode === 'single'
-                    ? 'Books the first available slot from the days/times list'
-                    : 'Books one slot for each day specified'}
-                </p>
-              </div>
-
-              <div className="flex items-center pt-6">
-                <input
-                  type="checkbox"
-                  checked={formData.active}
-                  onChange={(e) => setFormData({ ...formData, active: e.target.checked })}
-                  className="h-4 w-4 rounded border-gray-600 text-indigo-600 focus:ring-indigo-500"
-                />
-                <label className="ml-2 block text-sm text-gray-100">Active</label>
               </div>
             </div>
 
             {/* Days Configuration */}
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">
-                Days to Book
+                {showWeekdayPicker ? 'Days of Week' : 'Date to Book'}
               </label>
               <p className="text-xs text-gray-500 mb-3">
-                You can mix weekdays (for recurring bookings) and specific dates (for one-time bookings)
+                {showWeekdayPicker
+                  ? 'Select which days of the week to attempt booking (books 2 weeks ahead)'
+                  : 'Select the specific date you want to book'}
               </p>
 
-              {/* Tab Switcher */}
-              <div className="flex gap-2 mb-3 border-b border-gray-700">
-                <button
-                  type="button"
-                  onClick={() => setDayInputMode('weekday')}
-                  className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                    dayInputMode === 'weekday'
-                      ? 'border-indigo-500 text-indigo-400'
-                      : 'border-transparent text-gray-400 hover:text-gray-300'
-                  }`}
-                >
-                  By Weekday
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDayInputMode('date')}
-                  className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                    dayInputMode === 'date'
-                      ? 'border-indigo-500 text-indigo-400'
-                      : 'border-transparent text-gray-400 hover:text-gray-300'
-                  }`}
-                >
-                  By Specific Date
-                </button>
-              </div>
-
-              {/* Input based on mode */}
               <div className="flex gap-2 mb-3">
-                {dayInputMode === 'weekday' ? (
+                {showWeekdayPicker ? (
                   <>
                     <select
                       value={newDay}
@@ -493,7 +525,9 @@ export default function BookingJobsPage() {
                     >
                       <option value="">Select weekday...</option>
                       {weekdays.map((day) => (
-                        <option key={day} value={day}>{day}</option>
+                        <option key={day} value={day}>
+                          {day}
+                        </option>
                       ))}
                     </select>
                     <button
@@ -502,7 +536,7 @@ export default function BookingJobsPage() {
                       disabled={!newDay}
                       className="rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:bg-gray-600 disabled:cursor-not-allowed"
                     >
-                      Add Weekday
+                      Add
                     </button>
                   </>
                 ) : (
@@ -519,7 +553,7 @@ export default function BookingJobsPage() {
                       disabled={!newDay}
                       className="rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:bg-gray-600 disabled:cursor-not-allowed"
                     >
-                      Add Date
+                      Add
                     </button>
                   </>
                 )}
@@ -533,11 +567,7 @@ export default function BookingJobsPage() {
                     className="inline-flex items-center gap-1 rounded-full bg-blue-900 px-3 py-1 text-sm font-semibold text-blue-300"
                   >
                     {day}
-                    <button
-                      type="button"
-                      onClick={() => removeDay(day)}
-                      className="hover:text-blue-100"
-                    >
+                    <button type="button" onClick={() => removeDay(day)} className="hover:text-blue-100">
                       ×
                     </button>
                   </span>
@@ -548,77 +578,98 @@ export default function BookingJobsPage() {
               </div>
             </div>
 
-            {/* Time Slots Configuration */}
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">Time Slots</label>
-              <p className="text-xs text-gray-500 mb-3">
-                Select a start time and duration for each time slot
-              </p>
-              <div className="flex gap-2 mb-2">
-                <div className="flex-1">
-                  <label className="block text-xs font-medium text-gray-400 mb-1">Start Time</label>
+            {/* Time Preferences */}
+            <div className="border-t border-gray-700 pt-6">
+              <h3 className="text-sm font-medium text-gray-200 mb-4">Time Preferences</h3>
+              <TimePreferencePicker
+                preferredTime={formData.preferredTime}
+                timeFlexibility={formData.timeFlexibility}
+                onChange={({ preferredTime, timeFlexibility }) =>
+                  setFormData({ ...formData, preferredTime, timeFlexibility })
+                }
+              />
+            </div>
+
+            {/* Duration Preferences */}
+            <div className="border-t border-gray-700 pt-6">
+              <h3 className="text-sm font-medium text-gray-200 mb-4">Duration Preferences</h3>
+              <DurationRangePicker
+                preferredDuration={formData.preferredDuration}
+                minDuration={formData.minDuration}
+                strictDuration={formData.strictDuration}
+                onChange={({ preferredDuration, minDuration, strictDuration }) =>
+                  setFormData({ ...formData, preferredDuration, minDuration, strictDuration })
+                }
+              />
+            </div>
+
+            {/* Advanced Options */}
+            <div className="border-t border-gray-700 pt-6">
+              <h3 className="text-sm font-medium text-gray-200 mb-4">Advanced Options</h3>
+              <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-1">
+                    Max Bookings Per Day
+                  </label>
                   <input
-                    type="time"
-                    value={newTimeSlot}
-                    onChange={(e) => setNewTimeSlot(e.target.value)}
+                    type="number"
+                    min={1}
+                    max={5}
+                    value={formData.maxBookingsPerDay}
+                    onChange={(e) =>
+                      setFormData({ ...formData, maxBookingsPerDay: parseInt(e.target.value) || 1 })
+                    }
                     className="block w-full rounded-md bg-gray-700 border-gray-600 text-gray-100 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm px-3 py-2 border"
                   />
+                  <p className="mt-1 text-xs text-gray-400">
+                    How many bookings to make for this job per day
+                  </p>
                 </div>
-                <div className="flex-1">
-                  <label className="block text-xs font-medium text-gray-400 mb-1">Duration</label>
-                  <select
-                    value={newDuration}
-                    onChange={(e) => setNewDuration(parseInt(e.target.value))}
-                    className="block w-full rounded-md bg-gray-700 border-gray-600 text-gray-100 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm px-3 py-2 border"
-                  >
-                    <option value="120">2 hours</option>
-                    <option value="90">1.5 hours</option>
-                    <option value="60">1 hour</option>
-                    <option value="30">30 minutes</option>
-                  </select>
-                </div>
-                <button
-                  type="button"
-                  onClick={addTimeSlot}
-                  disabled={!newTimeSlot}
-                  className="self-end rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:bg-gray-600 disabled:cursor-not-allowed"
-                >
-                  Add Time
-                </button>
-              </div>
-              <div className="flex flex-wrap gap-2 mt-2">
-                {formData.timeSlots.map((slot) => (
-                  <span
-                    key={slot}
-                    className="inline-flex items-center gap-1 rounded-full bg-green-900 px-3 py-1 text-sm font-semibold text-green-300"
-                  >
-                    {formatTimeSlot(slot)}
-                    <button
-                      type="button"
-                      onClick={() => removeTimeSlot(slot)}
-                      className="hover:text-green-100"
-                    >
-                      ×
-                    </button>
-                  </span>
-                ))}
-                {formData.timeSlots.length === 0 && (
-                  <p className="text-sm text-gray-400">No time slots added yet</p>
+
+                {formData.recurrence === 'weekly' && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-1">
+                      Priority (0-10)
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={10}
+                      value={formData.priority}
+                      onChange={(e) =>
+                        setFormData({ ...formData, priority: parseInt(e.target.value) || 0 })
+                      }
+                      className="block w-full rounded-md bg-gray-700 border-gray-600 text-gray-100 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm px-3 py-2 border"
+                    />
+                    <p className="mt-1 text-xs text-gray-400">
+                      Higher priority jobs are processed first at noon
+                    </p>
+                  </div>
                 )}
+
+                <div className="flex items-center pt-4">
+                  <input
+                    type="checkbox"
+                    checked={formData.active}
+                    onChange={(e) => setFormData({ ...formData, active: e.target.checked })}
+                    className="h-4 w-4 rounded border-gray-600 text-indigo-600 focus:ring-indigo-500"
+                  />
+                  <label className="ml-2 block text-sm text-gray-100">Active</label>
+                </div>
               </div>
             </div>
 
-            <div className="flex space-x-3">
+            <div className="flex space-x-3 pt-4">
               <button
                 type="submit"
-                className="inline-flex justify-center rounded-md bg-green-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-green-500"
+                className="inline-flex justify-center rounded-md bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-green-500"
               >
                 {editingId ? 'Update' : 'Create'} Booking Job
               </button>
               <button
                 type="button"
                 onClick={resetForm}
-                className="inline-flex justify-center rounded-md bg-gray-700 px-3 py-2 text-sm font-semibold text-gray-100 shadow-sm ring-1 ring-inset ring-gray-600 hover:bg-gray-600"
+                className="inline-flex justify-center rounded-md bg-gray-700 px-4 py-2 text-sm font-semibold text-gray-100 shadow-sm ring-1 ring-inset ring-gray-600 hover:bg-gray-600"
               >
                 Cancel
               </button>
@@ -627,6 +678,7 @@ export default function BookingJobsPage() {
         </div>
       )}
 
+      {/* Jobs List */}
       <div className="mt-8 flow-root">
         <div className="-mx-4 -my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
           <div className="inline-block min-w-full py-2 align-middle sm:px-6 lg:px-8">
@@ -634,12 +686,24 @@ export default function BookingJobsPage() {
               <table className="min-w-full divide-y divide-gray-700 bg-gray-800">
                 <thead className="bg-gray-900">
                   <tr>
-                    <th className="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-100">Name</th>
-                    <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-100">Account</th>
-                    <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-100">Type</th>
-                    <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-100">Status</th>
-                    <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-100">Last Run</th>
-                    <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-100">Bookings</th>
+                    <th className="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-100">
+                      Name
+                    </th>
+                    <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-100">
+                      Account
+                    </th>
+                    <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-100">
+                      Time
+                    </th>
+                    <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-100">
+                      Duration
+                    </th>
+                    <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-100">
+                      Status
+                    </th>
+                    <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-100">
+                      Last Run
+                    </th>
                     <th className="relative py-3.5 pl-3 pr-4 sm:pr-6">
                       <span className="sr-only">Actions</span>
                     </th>
@@ -656,14 +720,20 @@ export default function BookingJobsPage() {
                     bookingJobs.map((job) => (
                       <>
                         <tr key={job.id} className="hover:bg-gray-750">
-                          <td className="whitespace-nowrap py-4 pl-4 pr-3 text-sm font-medium text-gray-100">
-                            {job.name}
+                          <td className="whitespace-nowrap py-4 pl-4 pr-3 text-sm">
+                            <div className="font-medium text-gray-100">{job.name}</div>
+                            <div className="text-gray-400 text-xs">
+                              {job.venue} • {job.recurrence}
+                            </div>
                           </td>
                           <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-400">
                             {job.account.name}
                           </td>
-                          <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-400 capitalize">
-                            {job.recurrence}
+                          <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-400">
+                            {getJobTimeDisplay(job)}
+                          </td>
+                          <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-400">
+                            {getJobDurationDisplay(job)}
                           </td>
                           <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-400">
                             <span
@@ -678,9 +748,6 @@ export default function BookingJobsPage() {
                           </td>
                           <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-400">
                             {job.lastRun ? new Date(job.lastRun).toLocaleString() : 'Never'}
-                          </td>
-                          <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-400">
-                            {job._count.reservations}
                           </td>
                           <td className="relative whitespace-nowrap py-4 pl-3 pr-4 text-right text-sm font-medium sm:pr-6 space-x-3">
                             <button
@@ -707,11 +774,15 @@ export default function BookingJobsPage() {
                           <tr key={`${job.id}-history`}>
                             <td colSpan={7} className="px-4 py-4 bg-gray-900">
                               <div className="space-y-3">
-                                <h3 className="text-sm font-semibold text-gray-100 mb-3">Run History</h3>
+                                <h3 className="text-sm font-semibold text-gray-100 mb-3">
+                                  Run History
+                                </h3>
                                 {loadingHistory ? (
                                   <div className="text-sm text-gray-400">Loading history...</div>
                                 ) : !Array.isArray(runHistory) || runHistory.length === 0 ? (
-                                  <div className="text-sm text-gray-400">No run history yet. Run the scheduler to see results here.</div>
+                                  <div className="text-sm text-gray-400">
+                                    No run history yet. Run the scheduler to see results here.
+                                  </div>
                                 ) : (
                                   <div className="space-y-2 max-h-96 overflow-y-auto">
                                     {runHistory.map((run) => {
@@ -722,10 +793,15 @@ export default function BookingJobsPage() {
                                         console.error('Failed to parse attempts:', e)
                                       }
                                       return (
-                                        <div key={run.id} className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+                                        <div
+                                          key={run.id}
+                                          className="bg-gray-800 rounded-lg p-3 border border-gray-700"
+                                        >
                                           <div className="flex items-center justify-between mb-2">
                                             <div className="flex items-center gap-3">
-                                              <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${getStatusColor(run.status)}`}>
+                                              <span
+                                                className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${getStatusColor(run.status)}`}
+                                              >
                                                 {getStatusLabel(run.status)}
                                               </span>
                                               <span className="text-xs text-gray-400">
@@ -744,22 +820,45 @@ export default function BookingJobsPage() {
                                           {attempts.length > 0 ? (
                                             <div className="space-y-1">
                                               {attempts.map((attempt, idx) => (
-                                                <div key={idx} className="flex items-center justify-between text-xs py-1 px-2 bg-gray-700 rounded">
+                                                <div
+                                                  key={idx}
+                                                  className="flex items-center justify-between text-xs py-1 px-2 bg-gray-700 rounded"
+                                                >
                                                   <div className="flex items-center gap-2">
-                                                    <span className={attempt.success ? 'text-green-400' : 'text-gray-500'}>
+                                                    <span
+                                                      className={
+                                                        attempt.success
+                                                          ? 'text-green-400'
+                                                          : 'text-gray-500'
+                                                      }
+                                                    >
                                                       {attempt.success ? '✓' : '✗'}
                                                     </span>
-                                                    <span className="text-gray-300">{attempt.date}</span>
-                                                    <span className="text-gray-400">at {attempt.timeSlot}</span>
+                                                    <span className="text-gray-300">
+                                                      {attempt.date}
+                                                    </span>
+                                                    <span className="text-gray-400">
+                                                      at {attempt.timeSlot}
+                                                    </span>
                                                     {attempt.duration && (
-                                                      <span className="text-gray-500">({attempt.duration}min)</span>
+                                                      <span className="text-gray-500">
+                                                        ({attempt.duration}min)
+                                                      </span>
                                                     )}
                                                   </div>
                                                   <div className="flex items-center gap-2">
                                                     {attempt.courtId && (
-                                                      <span className="text-blue-400">Court {attempt.courtId}</span>
+                                                      <span className="text-blue-400">
+                                                        Court {attempt.courtId}
+                                                      </span>
                                                     )}
-                                                    <span className={attempt.success ? 'text-green-400' : 'text-gray-500'}>
+                                                    <span
+                                                      className={
+                                                        attempt.success
+                                                          ? 'text-green-400'
+                                                          : 'text-gray-500'
+                                                      }
+                                                    >
                                                       {attempt.message}
                                                     </span>
                                                   </div>
@@ -767,7 +866,9 @@ export default function BookingJobsPage() {
                                               ))}
                                             </div>
                                           ) : (
-                                            <div className="text-xs text-gray-500 italic">No detailed attempts recorded</div>
+                                            <div className="text-xs text-gray-500 italic">
+                                              No detailed attempts recorded
+                                            </div>
                                           )}
                                         </div>
                                       )
