@@ -3,10 +3,16 @@ set -e
 
 # Court Booking Manager - Build and Push Script
 # Builds multi-platform Docker image and pushes to Docker Hub
+#
+# v2.0.0 - Pure TypeScript implementation (no Python dependencies)
+#   - Native CourtReserve API client
+#   - Modular scheduler (noon + polling modes)
+#   - Configurable logging (LOG_LEVEL env var)
+#   - Push notifications via ntfy.sh
 
 USERNAME="ashayc"
 IMAGE_NAME="court-booking-manager"
-VERSION="v1.0.0"
+VERSION="v2.0.0"
 
 echo "🚀 Building and pushing Court Booking Manager Docker image..."
 echo "   Username: $USERNAME"

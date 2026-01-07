@@ -1,4 +1,5 @@
 # Multi-stage build for Court Booking Manager Webapp
+# Pure TypeScript implementation - no Python dependencies
 
 # Stage 1: Build Next.js application
 FROM node:20-slim AS builder
@@ -29,24 +30,11 @@ FROM node:20-slim AS runner
 
 WORKDIR /app
 
-# Install system dependencies and Python packages
+# Install system dependencies (minimal - no Python needed)
 RUN apt-get update && apt-get install -y \
     openssl \
     ca-certificates \
-    python3 \
-    python3-pip \
-    python3-requests \
-    python3-bs4 \
-    python3-lxml \
     && rm -rf /var/lib/apt/lists/*
-
-# Install remaining Python dependencies via pip
-RUN pip3 install --no-cache-dir --break-system-packages \
-    python-dotenv
-
-# Copy Python booking scripts from root
-COPY book_court_sunnyvale.py ./
-COPY book_court_santa_clara.py ./
 
 # Copy built Next.js app from builder
 COPY --from=builder /app/webapp/.next ./.next
@@ -73,6 +61,7 @@ ENV NODE_ENV=production
 ENV PORT=3000
 ENV DATABASE_URL="file:./data/dev.db"
 ENV OPENSSL_CONF=/etc/ssl/
+ENV LOG_LEVEL=INFO
 
 # Expose port
 EXPOSE 3000
