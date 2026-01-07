@@ -63,23 +63,33 @@ model BookingJob {
 
   // Job type
   recurrence      String   // "once" or "weekly"
-  slotMode        String   // "single" or "multi"
+  slotMode        String?  // "single" or "multi" (DEPRECATED - for migration)
 
   // Days configuration (JSON array)
   // For single day: ["Monday"] or ["2025-01-15"]
   // For multi day: ["Monday", "Wednesday", "Friday"] or ["2025-01-15", "2025-01-17"]
   days            String   // JSON stringified array
 
-  // Time slots (JSON array of HH:MM strings)
-  // For single slot: picks first available from list
-  // For multi slot: books one per day
-  timeSlots       String   // JSON stringified array ["18:00", "18:30", "19:00"]
+  // OLD TIME PREFERENCES (DEPRECATED - for migration)
+  timeSlots       String?  // JSON stringified array ["18:00", "18:30", "19:00"]
+  durations       String?  // JSON stringified array [120, 90, 60, 30]
 
-  // Duration preferences (JSON array in minutes)
-  durations       String   @default("[120, 90, 60, 30]") // JSON stringified array
+  // NEW TIME PREFERENCES
+  preferredTime     String?  // "18:00" - preferred start time
+  timeFlexibility   Int      @default(30)  // 0, 30, 60, or 90 minutes
+
+  // NEW DURATION PREFERENCES
+  preferredDuration Int      @default(120)  // ideal duration in minutes
+  minDuration       Int      @default(60)   // minimum acceptable duration
+  strictDuration    Boolean  @default(false) // if true, only book preferredDuration
+
+  // NEW BEHAVIOR CONTROLS
+  maxBookingsPerDay Int      @default(1)    // user configurable
+  priority          Int      @default(0)    // higher = processed first at noon
 
   // Status
   active          Boolean  @default(true)
+  archived        Boolean  @default(false)  // for completed one-time jobs
   lastRun         DateTime?
   nextRun         DateTime?
 
@@ -91,7 +101,9 @@ model BookingJob {
 
   @@index([accountId])
   @@index([active])
+  @@index([archived])
   @@index([nextRun])
+  @@index([priority])
 }
 
 // Booking run history - tracks each execution attempt
@@ -100,20 +112,23 @@ model BookingRunHistory {
   bookingJobId    String
   bookingJob      BookingJob @relation(fields: [bookingJobId], references: [id], onDelete: Cascade)
 
+  runMode         String?  // "noon" | "polling" | "manual"
   startedAt       DateTime @default(now())
   completedAt     DateTime?
-  status          String   // "success", "partial", "failed", "no_courts"
-  
+  durationMs      Int?     // execution time in milliseconds
+  status          String   // "success", "partial", "failed", "no_courts", "locked", "error", "window_closed"
+
   // Detailed results per target date
   attempts        String   // JSON: [{ date, timeSlot, success, message, courtId?, duration? }]
-  
+
   successCount    Int      @default(0)
   failureCount    Int      @default(0)
-  
+
   errorMessage    String?  // If the entire run failed
-  
+
   createdAt       DateTime @default(now())
 
   @@index([bookingJobId])
   @@index([startedAt])
+  @@index([runMode])
 }

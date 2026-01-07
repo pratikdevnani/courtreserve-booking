@@ -40,23 +40,13 @@ export async function GET(
 }
 
 // PATCH /api/booking-jobs/[id] - Update booking job
+// Supports both new schema (preferredTime, etc.) and legacy schema (timeSlots, etc.)
 export async function PATCH(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
     const body = await request.json()
-    const {
-      name,
-      accountId,
-      venue,
-      recurrence,
-      slotMode,
-      days,
-      timeSlots,
-      durations,
-      active,
-    } = body
 
     // Check if booking job exists
     const existing = await prisma.bookingJob.findUnique({
@@ -71,7 +61,7 @@ export async function PATCH(
     }
 
     // Validate venue if provided
-    if (venue && !['sunnyvale', 'santa_clara'].includes(venue)) {
+    if (body.venue && !['sunnyvale', 'santa_clara'].includes(body.venue)) {
       return NextResponse.json(
         { error: 'Venue must be either "sunnyvale" or "santa_clara"' },
         { status: 400 }
@@ -79,34 +69,56 @@ export async function PATCH(
     }
 
     // Validate recurrence if provided
-    if (recurrence && !['once', 'weekly'].includes(recurrence)) {
+    if (body.recurrence && !['once', 'weekly'].includes(body.recurrence)) {
       return NextResponse.json(
         { error: 'Recurrence must be either "once" or "weekly"' },
         { status: 400 }
       )
     }
 
-    // Validate slotMode if provided
-    if (slotMode && !['single', 'multi'].includes(slotMode)) {
-      return NextResponse.json(
-        { error: 'Slot mode must be either "single" or "multi"' },
-        { status: 400 }
-      )
+    // Build update data - support both schemas
+    const updateData: Record<string, unknown> = {}
+
+    // Common fields
+    if (body.name !== undefined) updateData.name = body.name
+    if (body.accountId !== undefined) updateData.accountId = body.accountId
+    if (body.venue !== undefined) updateData.venue = body.venue
+    if (body.recurrence !== undefined) updateData.recurrence = body.recurrence
+    if (body.days !== undefined) updateData.days = JSON.stringify(body.days)
+    if (body.active !== undefined) updateData.active = body.active
+
+    // Check if using new schema (preferredTime is the indicator)
+    if (body.preferredTime !== undefined) {
+      // New schema fields
+      updateData.preferredTime = body.preferredTime
+      updateData.timeFlexibility = body.timeFlexibility ?? 30
+      updateData.preferredDuration = body.preferredDuration ?? 120
+      updateData.minDuration = body.minDuration ?? 60
+      updateData.strictDuration = body.strictDuration ?? false
+      updateData.maxBookingsPerDay = body.maxBookingsPerDay ?? 1
+      updateData.priority = body.priority ?? 0
+      // Clear legacy fields when using new schema
+      updateData.slotMode = null
+      updateData.timeSlots = null
+      updateData.durations = null
+    } else {
+      // Legacy schema fields (backward compat)
+      if (body.slotMode !== undefined) {
+        if (!['single', 'multi'].includes(body.slotMode)) {
+          return NextResponse.json(
+            { error: 'Slot mode must be either "single" or "multi"' },
+            { status: 400 }
+          )
+        }
+        updateData.slotMode = body.slotMode
+      }
+      if (body.timeSlots !== undefined) updateData.timeSlots = JSON.stringify(body.timeSlots)
+      if (body.durations !== undefined) updateData.durations = JSON.stringify(body.durations)
     }
 
     const bookingJob = await prisma.bookingJob.update({
       where: { id: params.id },
-      data: {
-        ...(name !== undefined && { name }),
-        ...(accountId !== undefined && { accountId }),
-        ...(venue !== undefined && { venue }),
-        ...(recurrence !== undefined && { recurrence }),
-        ...(slotMode !== undefined && { slotMode }),
-        ...(days !== undefined && { days: JSON.stringify(days) }),
-        ...(timeSlots !== undefined && { timeSlots: JSON.stringify(timeSlots) }),
-        ...(durations !== undefined && { durations: JSON.stringify(durations) }),
-        ...(active !== undefined && { active }),
-      },
+      data: updateData,
       include: {
         account: {
           select: {
