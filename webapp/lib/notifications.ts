@@ -20,6 +20,7 @@ const log = createLogger('Notifications');
 const NTFY_SERVER = process.env.NTFY_SERVER || 'https://ntfy.sh';
 const NTFY_TOPIC = process.env.NTFY_TOPIC || '';
 const NTFY_ENABLED = process.env.NTFY_ENABLED !== 'false';
+const NTFY_CLICK_BASE_URL = process.env.NTFY_CLICK_BASE_URL || 'https://pickleball.ashayc.com';
 
 // Priority levels for ntfy
 type Priority = 'min' | 'low' | 'default' | 'high' | 'max';
@@ -30,6 +31,8 @@ interface NotificationOptions {
   tags?: string[];
   click?: string;
   attach?: string;
+  icon?: string;
+  markdown?: boolean;
   actions?: NotificationAction[];
 }
 
@@ -92,6 +95,14 @@ export async function sendNotification(
       headers['Attach'] = options.attach;
     }
 
+    if (options.icon) {
+      headers['Icon'] = options.icon;
+    }
+
+    if (options.markdown) {
+      headers['Markdown'] = 'yes';
+    }
+
     if (options.actions && options.actions.length > 0) {
       headers['Actions'] = options.actions
         .map((a) => {
@@ -144,18 +155,27 @@ export async function notifyBookingSuccess(params: {
   const message = [
     `Court booked successfully!`,
     ``,
-    `Job: ${params.jobName}`,
-    `Venue: ${params.venue}`,
-    `Date: ${params.date}`,
-    `Time: ${params.time}`,
-    `Duration: ${params.duration} minutes`,
-    `Court: ${params.courtId}`,
+    `**Job:** ${params.jobName}`,
+    `**Venue:** ${params.venue}`,
+    `**Date:** ${params.date}`,
+    `**Time:** ${params.time}`,
+    `**Duration:** ${params.duration} minutes`,
+    `**Court:** ${params.courtId}`,
   ].join('\n');
 
   return sendNotification(message, {
     title: `Booking Confirmed - ${params.venue}`,
     priority: 'high',
     tags: ['white_check_mark', 'tennis'],
+    markdown: true,
+    click: `${NTFY_CLICK_BASE_URL}/reservations`,
+    actions: [
+      {
+        action: 'view',
+        label: 'View Reservations',
+        url: `${NTFY_CLICK_BASE_URL}/reservations`,
+      },
+    ],
   });
 }
 
@@ -170,19 +190,28 @@ export async function notifyBookingFailure(params: {
   attemptsCount: number;
 }): Promise<boolean> {
   const message = [
-    `Failed to book court`,
+    `Failed to book court at noon`,
     ``,
-    `Job: ${params.jobName}`,
-    `Venue: ${params.venue}`,
-    `Date: ${params.date}`,
-    `Reason: ${params.reason}`,
-    `Attempts: ${params.attemptsCount}`,
+    `**Job:** ${params.jobName}`,
+    `**Venue:** ${params.venue}`,
+    `**Date:** ${params.date}`,
+    `**Reason:** ${params.reason}`,
+    `**Attempts:** ${params.attemptsCount}`,
   ].join('\n');
 
   return sendNotification(message, {
     title: `Booking Failed - ${params.venue}`,
-    priority: 'default',
+    priority: 'high',
     tags: ['x', 'warning'],
+    markdown: true,
+    click: `${NTFY_CLICK_BASE_URL}/booking-jobs`,
+    actions: [
+      {
+        action: 'view',
+        label: 'View Jobs',
+        url: `${NTFY_CLICK_BASE_URL}/booking-jobs`,
+      },
+    ],
   });
 }
 
@@ -194,16 +223,17 @@ export async function notifySchedulerError(params: {
   error: string;
 }): Promise<boolean> {
   const message = [
-    `Scheduler error occurred`,
+    `Scheduler encountered an error`,
     ``,
-    `Mode: ${params.mode}`,
-    `Error: ${params.error}`,
+    `**Mode:** ${params.mode}`,
+    `**Error:** ${params.error}`,
   ].join('\n');
 
   return sendNotification(message, {
     title: 'Scheduler Error',
-    priority: 'high',
-    tags: ['rotating_light', 'warning'],
+    priority: 'max',
+    tags: ['rotating_light', 'skull'],
+    markdown: true,
   });
 }
 
@@ -237,6 +267,35 @@ export async function notifyDailySummary(params: {
     title: `Daily Summary - ${params.successCount} Bookings`,
     priority: params.failureCount > 0 ? 'default' : 'low',
     tags: params.successCount > 0 ? ['chart_with_upwards_trend'] : ['chart_with_downwards_trend'],
+  });
+}
+
+/**
+ * Send a reservation cancellation notification
+ */
+export async function notifyReservationCancelled(params: {
+  venue: string;
+  date: string;
+  time: string;
+  duration: number;
+  reason: string;
+}): Promise<boolean> {
+  const message = [
+    `Reservation cancelled`,
+    ``,
+    `**Venue:** ${params.venue}`,
+    `**Date:** ${params.date}`,
+    `**Time:** ${params.time}`,
+    `**Duration:** ${params.duration} minutes`,
+    `**Reason:** ${params.reason}`,
+  ].join('\n');
+
+  return sendNotification(message, {
+    title: 'Reservation Cancelled',
+    priority: 'default',
+    tags: ['wastebasket'],
+    markdown: true,
+    click: `${NTFY_CLICK_BASE_URL}/reservations`,
   });
 }
 

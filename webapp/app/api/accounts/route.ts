@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
+import { createLogger } from '@/lib/logger'
+
+const log = createLogger('API:Accounts')
 
 // GET /api/accounts - List all accounts
 export async function GET() {
@@ -9,7 +12,9 @@ export async function GET() {
     })
     return NextResponse.json(accounts)
   } catch (error) {
-    console.error('Error fetching accounts:', error)
+    log.error('Error fetching accounts', {
+      error: error instanceof Error ? error.message : String(error),
+    })
     return NextResponse.json(
       { error: 'Failed to fetch accounts' },
       { status: 500 }
@@ -21,7 +26,7 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { name, email, password, venue, active = true } = body
+    const { name, email, password, venue, isResident = true, active = true } = body
 
     // Validate required fields
     if (!name || !email || !password || !venue) {
@@ -57,13 +62,16 @@ export async function POST(request: NextRequest) {
         email,
         password,
         venue,
+        isResident,
         active,
       },
     })
 
     return NextResponse.json(account, { status: 201 })
   } catch (error) {
-    console.error('Error creating account:', error)
+    log.error('Error creating account', {
+      error: error instanceof Error ? error.message : String(error),
+    })
     return NextResponse.json(
       { error: 'Failed to create account' },
       { status: 500 }

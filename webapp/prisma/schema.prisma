@@ -7,7 +7,7 @@ generator client {
 
 datasource db {
   provider = "sqlite"
-  url      = "file:./dev.db"
+  url      = env("DATABASE_URL")
 }
 
 // Account used for booking courts
@@ -17,6 +17,7 @@ model Account {
   email        String        @unique
   password     String        // Plain text (since this is single-user local app)
   venue        String        // "sunnyvale" or "santa_clara"
+  isResident   Boolean       @default(true) // Sunnyvale resident (affects booking window)
   cookieJar    String?       // Path to cookie jar file
   active       Boolean       @default(true)
   createdAt    DateTime      @default(now())
@@ -39,10 +40,11 @@ model Reservation {
   duration        Int      // minutes
 
   // Metadata for tracking
-  bookedAt        DateTime @default(now())
-  externalId      String?  // Reservation ID from CourtReserve (if available)
-  bookingJobId    String?  // Link to the job that created this
-  bookingJob      BookingJob? @relation(fields: [bookingJobId], references: [id], onDelete: SetNull)
+  bookedAt           DateTime @default(now())
+  externalId         String?  // Reservation ID from CourtReserve (if available)
+  confirmationNumber String?  // Confirmation number from CourtReserve (e.g., "CZCG67413233939")
+  bookingJobId       String?  // Link to the job that created this
+  bookingJob         BookingJob? @relation(fields: [bookingJobId], references: [id], onDelete: SetNull)
 
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -92,6 +94,12 @@ model BookingJob {
   archived        Boolean  @default(false)  // for completed one-time jobs
   lastRun         DateTime?
   nextRun         DateTime?
+  lastAttemptAt   DateTime?  // When job last tried to find slots
+
+  // Latest attempt result details
+  lastAttemptStatus   String?  // "success" | "no_courts" | "error" | "window_closed" | "locked"
+  lastAttemptMessage  String?  // Human-readable message
+  lastAttemptDate     String?  // Target date attempted (YYYY-MM-DD)
 
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt

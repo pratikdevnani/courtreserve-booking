@@ -12,6 +12,9 @@ type Reservation = {
   startTime: string
   duration: number
   bookedAt: string
+  source: 'portal' | 'external'
+  externalId?: string
+  confirmationNumber?: string
   account: {
     id: string
     name: string
@@ -27,6 +30,9 @@ export default function ReservationsPage() {
   const [reservations, setReservations] = useState<Reservation[]>([])
   const [loading, setLoading] = useState(true)
   const [filterVenue, setFilterVenue] = useState<string>('')
+  const [cancelModalOpen, setCancelModalOpen] = useState(false)
+  const [selectedReservation, setSelectedReservation] = useState<Reservation | null>(null)
+  const [cancellationReason, setCancellationReason] = useState('')
 
   useEffect(() => {
     fetchReservations()
@@ -43,28 +49,46 @@ export default function ReservationsPage() {
       const data = await res.json()
       setReservations(data)
     } catch (error) {
-      console.error('Error fetching reservations:', error)
+      // Error handled silently - user sees empty state
     } finally {
       setLoading(false)
     }
   }
 
-  const handleDelete = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this reservation?')) {
+  const handleDelete = (reservation: Reservation) => {
+    setSelectedReservation(reservation)
+    setCancellationReason('')
+    setCancelModalOpen(true)
+  }
+
+  const confirmCancellation = async () => {
+    if (!selectedReservation || !cancellationReason.trim()) {
+      alert('Please provide a cancellation reason')
       return
     }
 
     try {
-      const res = await fetch(`/api/reservations/${id}`, { method: 'DELETE' })
+      const res = await fetch(`/api/reservations/${selectedReservation.id}`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          cancellationReason: cancellationReason.trim(),
+        }),
+      })
 
       if (res.ok) {
+        setCancelModalOpen(false)
+        setSelectedReservation(null)
+        setCancellationReason('')
         await fetchReservations()
       } else {
         const error = await res.json()
         alert(`Error: ${error.error}`)
       }
     } catch (error) {
-      console.error('Error deleting reservation:', error)
+      // Error shown via alert
       alert('Failed to delete reservation')
     }
   }
@@ -134,8 +158,17 @@ export default function ReservationsPage() {
                     reservations.map((reservation) => (
                       <tr key={reservation.id}>
                         <td className="whitespace-nowrap py-4 pl-4 pr-3 text-sm">
-                          <div className="font-medium text-gray-100">{reservation.account.name}</div>
-                          <div className="text-gray-400">{reservation.account.email}</div>
+                          <div className="flex items-center gap-2">
+                            <div>
+                              <div className="font-medium text-gray-100">{reservation.account.name}</div>
+                              <div className="text-gray-400">{reservation.account.email}</div>
+                            </div>
+                            {reservation.source === 'external' && (
+                              <span className="inline-flex items-center rounded-md bg-blue-400/10 px-2 py-1 text-xs font-medium text-blue-400 ring-1 ring-inset ring-blue-400/30">
+                                External
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-300 capitalize">
                           {reservation.venue.replace('_', ' ')}
@@ -163,7 +196,7 @@ export default function ReservationsPage() {
                         </td>
                         <td className="relative whitespace-nowrap py-4 pl-3 pr-4 text-right text-sm font-medium sm:pr-6">
                           <button
-                            onClick={() => handleDelete(reservation.id)}
+                            onClick={() => handleDelete(reservation)}
                             className="text-red-400 hover:text-red-300"
                           >
                             Delete
@@ -182,6 +215,62 @@ export default function ReservationsPage() {
       {reservations.length > 0 && (
         <div className="mt-4 text-sm text-gray-400">
           Total: {reservations.length} reservation{reservations.length !== 1 ? 's' : ''}
+        </div>
+      )}
+
+      {/* Cancellation Modal */}
+      {cancelModalOpen && selectedReservation && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
+          <div className="bg-gray-800 rounded-lg shadow-xl p-6 w-full max-w-md border border-gray-700">
+            <h2 className="text-xl font-semibold text-gray-100 mb-4">Cancel Reservation</h2>
+            <div className="mb-4">
+              <p className="text-sm text-gray-300 mb-2">
+                You are about to cancel the following reservation:
+              </p>
+              <div className="bg-gray-900 rounded p-3 mb-3 text-sm">
+                <div className="text-gray-300">
+                  <strong>{selectedReservation.account.name}</strong> - {selectedReservation.venue.replace('_', ' ')}
+                </div>
+                <div className="text-gray-400">
+                  {formatDateTime(selectedReservation.date, selectedReservation.startTime)} ({selectedReservation.duration} min)
+                </div>
+                {selectedReservation.courtId && (
+                  <div className="text-gray-400">Court {selectedReservation.courtId}</div>
+                )}
+              </div>
+              <label htmlFor="cancellationReason" className="block text-sm font-medium text-gray-300 mb-2">
+                Cancellation Reason <span className="text-red-400">*</span>
+              </label>
+              <input
+                id="cancellationReason"
+                type="text"
+                value={cancellationReason}
+                onChange={(e) => setCancellationReason(e.target.value)}
+                placeholder="e.g., Schedule conflict, Weather, etc."
+                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent"
+                autoFocus
+              />
+            </div>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => {
+                  setCancelModalOpen(false)
+                  setSelectedReservation(null)
+                  setCancellationReason('')
+                }}
+                className="px-4 py-2 bg-gray-700 text-gray-300 rounded-md hover:bg-gray-600 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmCancellation}
+                disabled={!cancellationReason.trim()}
+                className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:bg-gray-600 disabled:cursor-not-allowed transition-colors"
+              >
+                Confirm Cancellation
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

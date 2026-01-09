@@ -13,7 +13,11 @@ import {
   recordReservation,
   updateJobTimestamps,
   archiveJob,
+  updateLastAttempt,
+  shouldRecordHistory,
+  recordRunHistory,
 } from './job-processor';
+import { notifyBookingFailure, isNotificationConfigured } from '../notifications';
 import { createLogger } from '../logger';
 
 const log = createLogger('Scheduler:NoonMode');
@@ -250,6 +254,7 @@ export class NoonModeHandler {
     for (let i = 0; i < results.length; i++) {
       const result = results[i];
       const prepared = jobsList[i];
+      const executeStarted = new Date(executeStartTime);
 
       if (result.status === 'fulfilled') {
         jobResults.push(result.value);
@@ -258,6 +263,52 @@ export class NoonModeHandler {
           status: result.value.status,
           attemptsCount: result.value.attempts.length,
         });
+
+        // Update last attempt with result details (always, even for non-meaningful events)
+        const targetDate = getTargetDate(prepared.job);
+        await updateLastAttempt(prepared.job.id, result.value, targetDate || undefined);
+
+        // Record history if meaningful
+        if (shouldRecordHistory(result.value, 'noon')) {
+          try {
+            await recordRunHistory(
+              prepared.job.id,
+              'noon',
+              result.value,
+              executeStarted,
+              new Date()
+            );
+            log.debug('Run history recorded', {
+              jobName: prepared.job.name,
+              status: result.value.status,
+            });
+
+            // Send failure notification for meaningful failures
+            if (result.value.status !== 'success' && isNotificationConfigured()) {
+              const targetDate = getTargetDate(prepared.job);
+              const reason =
+                result.value.errorMessage ||
+                'Courts were available but booking failed';
+
+              await notifyBookingFailure({
+                jobName: prepared.job.name,
+                venue: prepared.job.venue,
+                date: targetDate || 'Unknown',
+                reason,
+                attemptsCount: result.value.attempts.length,
+              }).catch((err) => {
+                log.warn('Failed to send failure notification', {
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              });
+            }
+          } catch (error) {
+            log.error('Failed to record run history', {
+              jobName: prepared.job.name,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
       } else {
         log.error('Job execution rejected', {
           jobName: prepared.job.name,
@@ -366,6 +417,8 @@ export class NoonModeHandler {
                 success: true,
                 message: 'Booked successfully',
                 timestamp: new Date(),
+                externalId: result.externalId,
+                confirmationNumber: result.confirmationNumber,
               };
             } catch (error) {
               return {
@@ -400,9 +453,37 @@ export class NoonModeHandler {
             durationMs: Date.now() - jobStartTime,
           });
 
+          // Fetch reservation details (external ID, confirmation number) from unpaid transactions
+          let externalId = successfulAttempt.externalId;
+          let confirmationNumber = successfulAttempt.confirmationNumber;
+
+          if (!externalId) {
+            log.debug('Fetching reservation details from API', { jobName: prepared.job.name });
+            const details = await prepared.client.fetchReservationDetails(
+              successfulAttempt.date!,
+              successfulAttempt.timeSlot
+            );
+            if (details) {
+              externalId = details.externalId;
+              confirmationNumber = details.confirmationNumber;
+              log.info('Reservation details fetched successfully', {
+                jobName: prepared.job.name,
+                externalId,
+                confirmationNumber,
+              });
+            } else {
+              log.warn('Could not fetch reservation details', { jobName: prepared.job.name });
+            }
+          }
+
           // Record reservation
           log.debug('Recording reservation to database', { jobName: prepared.job.name });
-          await recordReservation(prepared.job, successfulAttempt);
+          await recordReservation(
+            prepared.job,
+            successfulAttempt,
+            externalId,
+            confirmationNumber
+          );
 
           // Update job timestamps
           log.debug('Updating job timestamps', { jobId: prepared.job.id });
@@ -442,10 +523,17 @@ export class NoonModeHandler {
         durationMs: Date.now() - jobStartTime,
       });
 
+      // Check if all attempts indicate window closed
+      const allWindowClosed = attempts.length > 0 && attempts.every(
+        (a) => a.message?.includes('window not yet open') ||
+               a.message?.includes('only allowed to reserve up to')
+      );
+
       return {
         jobId: prepared.job.id,
-        status: 'no_courts',
+        status: allWindowClosed ? 'window_closed' : 'no_courts',
         attempts,
+        errorMessage: allWindowClosed ? 'Booking window not open yet' : undefined,
       };
     } catch (error) {
       log.error('Job execution error', {

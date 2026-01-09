@@ -9,6 +9,7 @@ import { LockManager } from './lock-manager';
 import { NoonModeHandler } from './noon-mode';
 import { PollingModeHandler } from './polling-mode';
 import { SchedulerMode, SchedulerRunResult, JobResult } from './types';
+import { notifySchedulerError, isNotificationConfigured } from '../notifications';
 import { createLogger } from '../logger';
 
 const log = createLogger('Scheduler:Main');
@@ -52,9 +53,19 @@ export class SchedulerService {
           await this.noonModeHandler.prepare();
           log.info('Noon preparation completed');
         } catch (error) {
-          log.error('Noon preparation failed', {
-            error: error instanceof Error ? error.message : String(error),
-          });
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          log.error('Noon preparation failed', { error: errorMessage });
+
+          if (isNotificationConfigured()) {
+            await notifySchedulerError({
+              mode: 'noon',
+              error: errorMessage,
+            }).catch((err) => {
+              log.warn('Failed to send scheduler error notification', {
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
+          }
         }
       },
       {
@@ -71,7 +82,23 @@ export class SchedulerService {
       '0 0 12 * * *',
       async () => {
         log.info('=== NOON EXECUTION TRIGGERED ===');
-        await this.runNoonMode();
+        try {
+          await this.runNoonMode();
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          log.error('Noon execution failed', { error: errorMessage });
+
+          if (isNotificationConfigured()) {
+            await notifySchedulerError({
+              mode: 'noon',
+              error: errorMessage,
+            }).catch((err) => {
+              log.warn('Failed to send scheduler error notification', {
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
+          }
+        }
       },
       {
         timezone: 'America/Los_Angeles',
@@ -87,7 +114,23 @@ export class SchedulerService {
       '*/15 * * * *',
       async () => {
         log.debug('=== POLLING MODE TRIGGERED ===');
-        await this.runPollingMode();
+        try {
+          await this.runPollingMode();
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          log.error('Polling mode failed', { error: errorMessage });
+
+          if (isNotificationConfigured()) {
+            await notifySchedulerError({
+              mode: 'polling',
+              error: errorMessage,
+            }).catch((err) => {
+              log.warn('Failed to send scheduler error notification', {
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
+          }
+        }
       },
       {
         timezone: 'America/Los_Angeles',

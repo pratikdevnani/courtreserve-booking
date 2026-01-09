@@ -207,24 +207,46 @@ export class CourtReserveClient {
           startTime: params.startTime,
           duration: params.duration,
           courtId: params.courtId,
+          externalId: response.reservationId,
+          confirmationNumber: response.confirmationNumber,
           elapsed: `${elapsed}ms`,
         });
         return {
           success: true,
           courtId: params.courtId,
           message: 'Booking successful',
+          externalId: response.reservationId,
+          confirmationNumber: response.confirmationNumber,
         };
       } else {
+        const message = response.message || 'Booking failed';
+
+        // Check if this is a booking window error
+        if (message.toLowerCase().includes('only allowed to reserve up to')) {
+          log.info('Booking window not yet open', {
+            date: params.date,
+            startTime: params.startTime,
+            message,
+            elapsed: `${elapsed}ms`,
+          });
+          return {
+            success: false,
+            message: 'Booking window not yet open',
+            windowClosed: true,
+            error: message,
+          };
+        }
+
         log.warn('Booking rejected by server', {
-          message: response.message,
+          message,
           date: params.date,
           startTime: params.startTime,
           elapsed: `${elapsed}ms`,
         });
         return {
           success: false,
-          message: response.message || 'Booking failed',
-          error: response.message,
+          message,
+          error: message,
         };
       }
     } catch (error) {
@@ -307,12 +329,55 @@ export class CourtReserveClient {
   }
 
   /**
-   * Get API config for internal use
+   * Get API config for use by API functions
    */
-  private getApiConfig(): api.ApiClientConfig {
+  getApiConfig(): api.ApiClientConfig {
     return {
       venue: this.venue,
       cookieManager: this.cookieManager,
     };
+  }
+
+  /**
+   * Fetch reservation details (external ID, confirmation number) after a successful booking
+   * Uses the GetUnPaidTransactions API to find the reservation by date/time
+   */
+  async fetchReservationDetails(
+    date: Date | string,
+    startTime: string
+  ): Promise<{ externalId: string; confirmationNumber: string } | null> {
+    log.debug('Fetching reservation details', {
+      date: typeof date === 'string' ? date : date.toISOString(),
+      startTime,
+    });
+
+    await this.ensureAuthenticated();
+
+    try {
+      const transactions = await api.getUnpaidTransactions(this.getApiConfig());
+      const match = api.findReservationInTransactions(transactions, date, startTime);
+
+      if (match) {
+        log.info('Found reservation details', {
+          externalId: match.ReservationId.toString(),
+          confirmationNumber: match.ReservationNumber,
+        });
+        return {
+          externalId: match.ReservationId.toString(),
+          confirmationNumber: match.ReservationNumber,
+        };
+      }
+
+      log.warn('Could not find reservation in unpaid transactions', {
+        date,
+        startTime,
+        transactionCount: transactions.length,
+      });
+      return null;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error('Failed to fetch reservation details', { error: errorMessage });
+      return null;
+    }
   }
 }

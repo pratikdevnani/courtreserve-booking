@@ -23,6 +23,10 @@ type BookingJob = {
   active: boolean
   lastRun?: string
   nextRun?: string
+  lastAttemptAt?: string
+  lastAttemptStatus?: string | null
+  lastAttemptMessage?: string | null
+  lastAttemptDate?: string | null
   // New schema fields
   preferredTime?: string | null
   timeFlexibility?: number | null
@@ -109,7 +113,7 @@ export default function BookingJobsPage() {
       const data = await res.json()
       setBookingJobs(data)
     } catch (error) {
-      console.error('Error fetching booking jobs:', error)
+      // Error handled silently - user sees empty state
     } finally {
       setLoading(false)
     }
@@ -121,7 +125,7 @@ export default function BookingJobsPage() {
       const data = await res.json()
       setAccounts(data.filter((a: Account) => a.active))
     } catch (error) {
-      console.error('Error fetching accounts:', error)
+      // Error handled silently
     }
   }
 
@@ -168,7 +172,7 @@ export default function BookingJobsPage() {
         alert(`Error: ${error.error}`)
       }
     } catch (error) {
-      console.error('Error saving booking job:', error)
+      // Error shown via alert
       alert('Failed to save booking job')
     }
   }
@@ -234,7 +238,7 @@ export default function BookingJobsPage() {
         alert(`Error: ${error.error}`)
       }
     } catch (error) {
-      console.error('Error deleting booking job:', error)
+      // Error shown via alert
       alert('Failed to delete booking job')
     }
   }
@@ -247,12 +251,12 @@ export default function BookingJobsPage() {
       const data = await res.json()
 
       if (data.success) {
-        const totals = data.totals || { success: 0, failed: 0, skipped: 0 }
+        const totals = data.totals || { success: 0, failure: 0, jobs: 0 }
         alert(
           `Scheduler (${mode}) completed!\n\n` +
+            `Total Jobs: ${totals.jobs}\n` +
             `Success: ${totals.success}\n` +
-            `Failed: ${totals.failed}\n` +
-            `Skipped: ${totals.skipped}\n\n` +
+            `Failed: ${totals.failure}\n\n` +
             `Check the reservations page to see any new bookings.`
         )
         await fetchBookingJobs() // Refresh to see updated lastRun times
@@ -260,7 +264,7 @@ export default function BookingJobsPage() {
         alert(`Scheduler failed: ${data.error}`)
       }
     } catch (error) {
-      console.error('Error running scheduler:', error)
+      // Error shown via alert
       alert('Failed to run scheduler')
     } finally {
       setRunningScheduler(false)
@@ -274,7 +278,7 @@ export default function BookingJobsPage() {
       const data = await res.json()
       setRunHistory(Array.isArray(data) ? data : [])
     } catch (error) {
-      console.error('Error fetching run history:', error)
+      // Error handled - show empty state
       setRunHistory([])
     } finally {
       setLoadingHistory(false)
@@ -408,6 +412,40 @@ export default function BookingJobsPage() {
 
   // Determine if we should show weekday picker or date picker based on recurrence
   const showWeekdayPicker = formData.recurrence === 'weekly'
+
+  // Helper: Get status badge styling
+  const getLastAttemptStatusBadge = (status: string | null | undefined) => {
+    switch (status) {
+      case 'success':
+        return { label: 'Success', className: 'bg-green-900 text-green-300' }
+      case 'no_courts':
+        return { label: 'No Courts', className: 'bg-yellow-900 text-yellow-300' }
+      case 'window_closed':
+        return { label: 'Too Early', className: 'bg-blue-900 text-blue-300' }
+      case 'locked':
+        return { label: 'Skipped', className: 'bg-gray-900 text-gray-400' }
+      case 'error':
+      default:
+        return { label: 'Error', className: 'bg-red-900 text-red-300' }
+    }
+  }
+
+  // Helper: Format relative time
+  const formatRelativeTime = (dateStr: string): string => {
+    const date = new Date(dateStr)
+    const now = new Date()
+    const diffMs = now.getTime() - date.getTime()
+    const diffMins = Math.floor(diffMs / 60000)
+
+    if (diffMins < 1) return 'Just now'
+    if (diffMins < 60) return `${diffMins} min ago`
+
+    const diffHours = Math.floor(diffMins / 60)
+    if (diffHours < 24) return `${diffHours}h ago`
+
+    const diffDays = Math.floor(diffHours / 24)
+    return `${diffDays}d ago`
+  }
 
   if (loading) {
     return <div className="text-center py-12 text-gray-300">Loading...</div>
@@ -702,7 +740,7 @@ export default function BookingJobsPage() {
                       Status
                     </th>
                     <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-100">
-                      Last Run
+                      Latest Result
                     </th>
                     <th className="relative py-3.5 pl-3 pr-4 sm:pr-6">
                       <span className="sr-only">Actions</span>
@@ -746,8 +784,41 @@ export default function BookingJobsPage() {
                               {job.active ? 'Active' : 'Inactive'}
                             </span>
                           </td>
-                          <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-400">
-                            {job.lastRun ? new Date(job.lastRun).toLocaleString() : 'Never'}
+                          <td className="px-3 py-4 text-sm">
+                            {job.lastAttemptAt ? (
+                              <div className="flex flex-col gap-0.5">
+                                {/* Row 1: Status badge + date */}
+                                <div className="flex items-center gap-2">
+                                  <span
+                                    className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                                      getLastAttemptStatusBadge(job.lastAttemptStatus).className
+                                    }`}
+                                  >
+                                    {getLastAttemptStatusBadge(job.lastAttemptStatus).label}
+                                  </span>
+                                  {job.lastAttemptDate && (
+                                    <span className="text-gray-500 text-xs">{job.lastAttemptDate}</span>
+                                  )}
+                                </div>
+
+                                {/* Row 2: Message */}
+                                {job.lastAttemptMessage && (
+                                  <span
+                                    className="text-gray-400 text-xs truncate max-w-[220px]"
+                                    title={job.lastAttemptMessage}
+                                  >
+                                    {job.lastAttemptMessage}
+                                  </span>
+                                )}
+
+                                {/* Row 3: Relative timestamp */}
+                                <span className="text-gray-500 text-xs">
+                                  {formatRelativeTime(job.lastAttemptAt)}
+                                </span>
+                              </div>
+                            ) : (
+                              <span className="text-gray-500">Never</span>
+                            )}
                           </td>
                           <td className="relative whitespace-nowrap py-4 pl-3 pr-4 text-right text-sm font-medium sm:pr-6 space-x-3">
                             <button
@@ -790,7 +861,7 @@ export default function BookingJobsPage() {
                                       try {
                                         attempts = JSON.parse(run.attempts)
                                       } catch (e) {
-                                        console.error('Failed to parse attempts:', e)
+                                        // Invalid JSON - show empty attempts
                                       }
                                       return (
                                         <div

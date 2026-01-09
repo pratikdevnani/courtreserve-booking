@@ -5,6 +5,8 @@
 export interface VenueConfig {
   orgId: string;
   schedulerId: string;
+  costTypeId: string;
+  reservationMinInterval: string;
   courtType: number;
   reservationTypeId: string;
   name: string;
@@ -34,6 +36,9 @@ export interface BookingResult {
   courtId?: number;
   message?: string;
   error?: string;
+  windowClosed?: boolean;  // Indicates booking window not yet open
+  externalId?: string;  // Reservation ID from CourtReserve
+  confirmationNumber?: string;  // Confirmation number from CourtReserve
 }
 
 export interface LoginResponse {
@@ -53,21 +58,33 @@ export interface ReservationFormData {
 export interface CreateReservationResponse {
   isValid: boolean;
   message?: string;
+  reservationId?: string;  // External ID from CourtReserve
+  confirmationNumber?: string;  // Confirmation number
+  [key: string]: any;
+}
+
+export interface CancelReservationResponse {
+  isValid: boolean;
+  message?: string;
   [key: string]: any;
 }
 
 export const VENUES: Record<string, VenueConfig> = {
   sunnyvale: {
     name: 'Sunnyvale',
-    orgId: '13234',
-    schedulerId: '16994',
+    orgId: '13233',
+    schedulerId: '16984',
+    costTypeId: '141158',
+    reservationMinInterval: '60',
     courtType: 9,
     reservationTypeId: '69707',
   },
   santa_clara: {
     name: 'Santa Clara',
-    orgId: '13234', // TODO: Update with actual values
+    orgId: '13234',
     schedulerId: '16994',
+    costTypeId: '141158',
+    reservationMinInterval: '60',
     courtType: 9,
     reservationTypeId: '69707',
   },

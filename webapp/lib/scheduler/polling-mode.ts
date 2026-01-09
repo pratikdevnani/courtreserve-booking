@@ -13,7 +13,11 @@ import {
   recordReservation,
   updateJobTimestamps,
   archiveJob,
+  updateLastAttempt,
+  shouldRecordHistory,
+  recordRunHistory,
 } from './job-processor';
+import { notifyBookingFailure, isNotificationConfigured } from '../notifications';
 import { createLogger } from '../logger';
 
 const log = createLogger('Scheduler:PollingMode');
@@ -72,6 +76,7 @@ export class PollingModeHandler {
       // Process jobs sequentially with delays (less aggressive than noon mode)
       for (let i = 0; i < jobs.length; i++) {
         const job = jobs[i];
+        const jobStartTime = new Date();
         try {
           log.debug('Processing job', {
             index: i + 1,
@@ -87,6 +92,51 @@ export class PollingModeHandler {
             status: result.status,
             attemptsCount: result.attempts.length,
           });
+
+          // Update last attempt with result details (always, even for non-meaningful events)
+          await updateLastAttempt(job.id, result, result.date);
+
+          // Record history if meaningful
+          if (shouldRecordHistory(result, 'polling')) {
+            try {
+              await recordRunHistory(
+                job.id,
+                'polling',
+                result,
+                jobStartTime,
+                new Date()
+              );
+              log.debug('Run history recorded', {
+                jobName: job.name,
+                status: result.status,
+              });
+
+              // Send failure notification for meaningful failures
+              if (result.status !== 'success' && isNotificationConfigured()) {
+                const targetDates = getTargetDates(job);
+                const reason =
+                  result.errorMessage ||
+                  'Courts were available but booking failed';
+
+                await notifyBookingFailure({
+                  jobName: job.name,
+                  venue: job.venue,
+                  date: targetDates[0] || 'Unknown',
+                  reason,
+                  attemptsCount: result.attempts.length,
+                }).catch((err) => {
+                  log.warn('Failed to send failure notification', {
+                    error: err instanceof Error ? err.message : String(err),
+                  });
+                });
+              }
+            } catch (error) {
+              log.error('Failed to record run history', {
+                jobName: job.name,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          }
 
           // Delay between jobs to avoid rate limiting
           if (i < jobs.length - 1) {
@@ -328,6 +378,8 @@ export class PollingModeHandler {
                 success: result.success,
                 message: result.message || (result.success ? 'Booked' : 'Failed'),
                 timestamp: new Date(),
+                externalId: result.externalId,
+                confirmationNumber: result.confirmationNumber,
               };
 
               attempts.push(attempt);
@@ -342,9 +394,29 @@ export class PollingModeHandler {
                   durationMs: Date.now() - jobStartTime,
                 });
 
+                // Fetch reservation details (external ID, confirmation number) from unpaid transactions
+                let externalId = result.externalId;
+                let confirmationNumber = result.confirmationNumber;
+
+                if (!externalId) {
+                  log.debug('Fetching reservation details from API', { jobName: job.name });
+                  const details = await client.fetchReservationDetails(targetDate, timeSlot);
+                  if (details) {
+                    externalId = details.externalId;
+                    confirmationNumber = details.confirmationNumber;
+                    log.info('Reservation details fetched successfully', {
+                      jobName: job.name,
+                      externalId,
+                      confirmationNumber,
+                    });
+                  } else {
+                    log.warn('Could not fetch reservation details', { jobName: job.name });
+                  }
+                }
+
                 // Record reservation
                 log.debug('Recording reservation to database', { jobName: job.name });
-                await recordReservation(job, attempt);
+                await recordReservation(job, attempt, externalId, confirmationNumber);
 
                 // Update timestamps
                 log.debug('Updating job timestamps', { jobId: job.id });
@@ -395,11 +467,17 @@ export class PollingModeHandler {
       }
     }
 
-    // No successful bookings
+    // No successful bookings - check if window closed
+    const allWindowClosed = attempts.length > 0 && attempts.every(
+      (a) => a.message?.includes('window not yet open') ||
+             a.message?.includes('only allowed to reserve up to')
+    );
+
     return {
       jobId: job.id,
-      status: attempts.length > 0 ? 'no_courts' : 'error',
+      status: allWindowClosed ? 'window_closed' : (attempts.length > 0 ? 'no_courts' : 'error'),
       attempts,
+      errorMessage: allWindowClosed ? 'Booking window not open yet' : undefined,
     };
   }
 }

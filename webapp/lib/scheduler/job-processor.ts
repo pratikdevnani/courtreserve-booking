@@ -12,13 +12,48 @@ import { notifyBookingSuccess, notifyBookingFailure, isNotificationConfigured } 
 const log = createLogger('Scheduler:JobProcessor');
 
 /**
- * Calculate target date for booking (7 days ahead)
+ * Get the maximum booking date based on residency and time of day
+ * - Before noon Pacific: Residents day+7, Non-residents day+6
+ * - At/after noon Pacific: Residents day+8, Non-residents day+7
+ */
+function getMaxBookingDate(isResident: boolean): Date {
+  const now = new Date();
+  const pacificHour = parseInt(
+    now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', hour12: false })
+  );
+
+  const isAfterNoon = pacificHour >= 12;
+
+  let daysAhead: number;
+  if (isResident) {
+    daysAhead = isAfterNoon ? 8 : 7;
+  } else {
+    daysAhead = isAfterNoon ? 7 : 6;
+  }
+
+  const maxDate = addDays(startOfDay(now), daysAhead);
+  // Set to end of day (11:59:59 PM)
+  maxDate.setHours(23, 59, 59, 999);
+
+  log.trace('Calculated max booking date', {
+    isResident,
+    pacificHour,
+    isAfterNoon,
+    daysAhead,
+    maxDate: format(maxDate, 'yyyy-MM-dd HH:mm:ss'),
+  });
+
+  return maxDate;
+}
+
+/**
+ * Calculate target date for booking (8 days ahead)
  * @param job - Booking job
  * @returns Date string in YYYY-MM-DD format, or null if no valid date
  */
 export function getTargetDate(job: JobWithAccount): string | null {
   const today = startOfDay(new Date());
-  const targetDate = addDays(today, 7); // Book 7 days ahead
+  const targetDate = addDays(today, 8); // Book 8 days ahead
 
   log.trace('Calculating target date', {
     jobName: job.name,
@@ -27,6 +62,20 @@ export function getTargetDate(job: JobWithAccount): string | null {
     targetDate: format(targetDate, 'yyyy-MM-dd'),
     targetDayName: format(targetDate, 'EEEE'),
   });
+
+  // Check if target date is within booking window
+  const isResident = job.account.isResident ?? true;
+  const maxBookingDate = getMaxBookingDate(isResident);
+
+  if (targetDate > maxBookingDate) {
+    log.debug('Target date beyond booking window', {
+      jobName: job.name,
+      targetDate: format(targetDate, 'yyyy-MM-dd'),
+      maxBookingDate: format(maxBookingDate, 'yyyy-MM-dd'),
+      isResident,
+    });
+    return null;
+  }
 
   // For recurring jobs, check if target date matches one of the configured days
   if (job.recurrence === 'weekly') {
@@ -202,7 +251,9 @@ export async function hasExistingReservation(
  */
 export async function recordReservation(
   job: JobWithAccount,
-  attempt: BookingAttempt
+  attempt: BookingAttempt,
+  externalId?: string,
+  confirmationNumber?: string
 ): Promise<void> {
   log.debug('Recording reservation', {
     jobId: job.id,
@@ -211,6 +262,8 @@ export async function recordReservation(
     timeSlot: attempt.timeSlot,
     duration: attempt.duration,
     courtId: attempt.courtId,
+    externalId,
+    confirmationNumber,
   });
 
   if (!attempt.success || !attempt.courtId) {
@@ -232,6 +285,8 @@ export async function recordReservation(
       duration: attempt.duration,
       bookingJobId: job.id,
       bookedAt: new Date(),
+      externalId: externalId || null,
+      confirmationNumber: confirmationNumber || null,
     },
   });
 
@@ -353,6 +408,111 @@ export async function archiveJob(jobId: string): Promise<void> {
 }
 
 /**
+ * Update last attempt timestamp and result details for a job
+ */
+export async function updateLastAttempt(
+  jobId: string,
+  result: JobResult,
+  targetDate?: string
+): Promise<void> {
+  const now = new Date();
+
+  log.trace('Updating last attempt with result', {
+    jobId,
+    timestamp: now.toISOString(),
+    status: result.status,
+    targetDate: targetDate || result.date,
+  });
+
+  await prisma.bookingJob.update({
+    where: { id: jobId },
+    data: {
+      lastAttemptAt: now,
+      lastAttemptStatus: result.status,
+      lastAttemptMessage: formatResultMessage(result),
+      lastAttemptDate: targetDate || result.date,
+    },
+  });
+
+  log.trace('Last attempt updated with result details', { jobId });
+}
+
+/**
+ * Format a human-readable message from job result
+ */
+function formatResultMessage(result: JobResult): string {
+  if (result.status === 'success') {
+    const attempt = result.attempts.find((a) => a.success);
+    if (attempt) {
+      return `Court ${attempt.courtId} at ${attempt.timeSlot}`;
+    }
+    return 'Booking successful';
+  }
+
+  if (result.status === 'no_courts') {
+    // Show how many slots were tried for context
+    const slotsCount = result.attempts.length;
+    if (slotsCount > 1) {
+      return `Tried ${slotsCount} slots, none available`;
+    }
+    return 'No courts available';
+  }
+
+  if (result.status === 'window_closed') {
+    return result.errorMessage || 'Booking window not open yet';
+  }
+
+  if (result.status === 'locked') {
+    return 'Skipped (another job running)';
+  }
+
+  if (result.status === 'error') {
+    // Truncate long error messages
+    const msg = result.errorMessage || 'Error occurred';
+    return msg.length > 50 ? msg.substring(0, 47) + '...' : msg;
+  }
+
+  return result.errorMessage || 'Unknown status';
+}
+
+/**
+ * Determine if a job result should be recorded in run history
+ */
+export function shouldRecordHistory(result: JobResult, mode: 'noon' | 'polling' | 'manual'): boolean {
+  // Always record success
+  if (result.status === 'success') {
+    log.trace('Should record history: success', { jobId: result.jobId });
+    return true;
+  }
+
+  // Always record unexpected errors
+  if (result.status === 'error') {
+    log.trace('Should record history: error', { jobId: result.jobId });
+    return true;
+  }
+
+  // For noon mode: record if we found courts but couldn't book
+  // (indicates we should have gotten the slot but lost the race)
+  if (mode === 'noon') {
+    const foundCourtsButFailed = result.attempts.some(
+      (a) => a.courtId !== undefined && !a.success
+    );
+    if (foundCourtsButFailed) {
+      log.trace('Should record history: noon mode found courts but failed', { jobId: result.jobId });
+      return true;
+    }
+  }
+
+  // Don't record: no_courts, locked, window_closed
+  log.trace('Should NOT record history', {
+    jobId: result.jobId,
+    status: result.status,
+    mode,
+  });
+  return false;
+}
+
+/**
  * Send notification when all booking attempts failed
  */
 export async function notifyJobFailure(
@@ -402,6 +562,7 @@ export async function fetchActiveJobs(): Promise<JobWithAccount[]> {
           email: true,
           password: true,
           venue: true,
+          isResident: true,
         },
       },
     },

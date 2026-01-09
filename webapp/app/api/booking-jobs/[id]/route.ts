@@ -1,14 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
+import { createLogger } from '@/lib/logger'
+
+const log = createLogger('API:BookingJobs')
 
 // GET /api/booking-jobs/[id] - Get single booking job
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const { id } = await params;
     const bookingJob = await prisma.bookingJob.findUnique({
-      where: { id: params.id },
+      where: { id },
       include: {
         account: true,
         reservations: {
@@ -31,7 +35,7 @@ export async function GET(
 
     return NextResponse.json(bookingJob)
   } catch (error) {
-    console.error('Error fetching booking job:', error)
+    log.error('Error fetching booking job', { error: error instanceof Error ? error.message : String(error) })
     return NextResponse.json(
       { error: 'Failed to fetch booking job' },
       { status: 500 }
@@ -43,14 +47,15 @@ export async function GET(
 // Supports both new schema (preferredTime, etc.) and legacy schema (timeSlots, etc.)
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const { id } = await params;
     const body = await request.json()
 
     // Check if booking job exists
     const existing = await prisma.bookingJob.findUnique({
-      where: { id: params.id },
+      where: { id },
     })
 
     if (!existing) {
@@ -117,7 +122,7 @@ export async function PATCH(
     }
 
     const bookingJob = await prisma.bookingJob.update({
-      where: { id: params.id },
+      where: { id },
       data: updateData,
       include: {
         account: {
@@ -132,7 +137,7 @@ export async function PATCH(
 
     return NextResponse.json(bookingJob)
   } catch (error) {
-    console.error('Error updating booking job:', error)
+    log.error('Error updating booking job', { error: error instanceof Error ? error.message : String(error) })
     return NextResponse.json(
       { error: 'Failed to update booking job' },
       { status: 500 }
@@ -143,12 +148,14 @@ export async function PATCH(
 // DELETE /api/booking-jobs/[id] - Delete booking job
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const { id } = await params;
+
     // Check if booking job exists
     const bookingJob = await prisma.bookingJob.findUnique({
-      where: { id: params.id },
+      where: { id },
       include: {
         _count: {
           select: {
@@ -167,7 +174,7 @@ export async function DELETE(
 
     // Delete booking job (reservations will have their bookingJobId set to null)
     await prisma.bookingJob.delete({
-      where: { id: params.id },
+      where: { id },
     })
 
     return NextResponse.json({
@@ -175,7 +182,7 @@ export async function DELETE(
       affectedReservations: bookingJob._count.reservations,
     })
   } catch (error) {
-    console.error('Error deleting booking job:', error)
+    log.error('Error deleting booking job', { error: error instanceof Error ? error.message : String(error) })
     return NextResponse.json(
       { error: 'Failed to delete booking job' },
       { status: 500 }

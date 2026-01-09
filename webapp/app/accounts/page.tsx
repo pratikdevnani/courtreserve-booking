@@ -8,6 +8,7 @@ type Account = {
   name: string
   email: string
   venue: string
+  isResident: boolean
   active: boolean
   createdAt: string
 }
@@ -24,6 +25,7 @@ export default function AccountsPage() {
     email: '',
     password: '',
     venue: 'sunnyvale',
+    isResident: true,
     active: true,
   })
 
@@ -37,7 +39,7 @@ export default function AccountsPage() {
       const data = await res.json()
       setAccounts(data)
     } catch (error) {
-      console.error('Error fetching accounts:', error)
+      // Error handled silently - user sees empty state
     } finally {
       setLoading(false)
     }
@@ -60,13 +62,13 @@ export default function AccountsPage() {
         await fetchAccounts()
         setShowForm(false)
         setEditingId(null)
-        setFormData({ name: '', email: '', password: '', venue: 'sunnyvale', active: true })
+        setFormData({ name: '', email: '', password: '', venue: 'sunnyvale', isResident: true, active: true })
       } else {
         const error = await res.json()
         alert(`Error: ${error.error}`)
       }
     } catch (error) {
-      console.error('Error saving account:', error)
+      // Error shown via alert
       alert('Failed to save account')
     }
   }
@@ -77,6 +79,7 @@ export default function AccountsPage() {
       email: account.email,
       password: '', // Don't populate password for security
       venue: account.venue,
+      isResident: account.isResident,
       active: account.active,
     })
     setEditingId(account.id)
@@ -98,7 +101,7 @@ export default function AccountsPage() {
         alert(`Error: ${error.error}`)
       }
     } catch (error) {
-      console.error('Error deleting account:', error)
+      // Error shown via alert
       alert('Failed to delete account')
     }
   }
@@ -131,7 +134,7 @@ export default function AccountsPage() {
         setTestResult({ success: false, message: data.error || 'Connection test failed' })
       }
     } catch (error) {
-      console.error('Error testing connection:', error)
+      // Error shown via testResult
       setTestResult({ success: false, message: 'Failed to test connection' })
     } finally {
       setTesting(false)
@@ -142,7 +145,7 @@ export default function AccountsPage() {
     setShowForm(false)
     setEditingId(null)
     setTestResult(null)
-    setFormData({ name: '', email: '', password: '', venue: 'sunnyvale', active: true })
+    setFormData({ name: '', email: '', password: '', venue: 'sunnyvale', isResident: true, active: true })
   }
 
   if (loading) {
@@ -216,6 +219,20 @@ export default function AccountsPage() {
                 <option value="sunnyvale">Sunnyvale</option>
                 <option value="santa_clara">Santa Clara</option>
               </select>
+            </div>
+            <div className="flex items-center">
+              <input
+                type="checkbox"
+                checked={formData.isResident}
+                onChange={(e) => setFormData({ ...formData, isResident: e.target.checked })}
+                className="h-4 w-4 rounded border-gray-600 bg-gray-700 text-indigo-600 focus:ring-indigo-500"
+              />
+              <label className="ml-2 text-sm text-gray-300">
+                Sunnyvale Resident
+                <span className="text-gray-400 text-xs ml-2">
+                  (Residents can book 1 day further ahead)
+                </span>
+              </label>
             </div>
             <div className="flex items-center">
               <input

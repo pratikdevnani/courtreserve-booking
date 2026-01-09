@@ -13,6 +13,7 @@ export interface JobWithAccount extends BookingJob {
     email: string;
     password: string;
     venue: string;
+    isResident: boolean;
   };
 }
 
@@ -32,6 +33,8 @@ export interface BookingAttempt {
   success: boolean;
   message: string;
   timestamp: Date;
+  externalId?: string;  // Reservation ID from CourtReserve
+  confirmationNumber?: string;  // Confirmation number from CourtReserve
 }
 
 export interface JobResult {
