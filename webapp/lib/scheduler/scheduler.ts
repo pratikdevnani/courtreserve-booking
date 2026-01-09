@@ -40,13 +40,13 @@ export class SchedulerService {
     log.info('Starting scheduler service...');
     this.startTime = new Date();
 
-    // Noon preparation - 11:59:50 AM Pacific (10 seconds before noon)
+    // Noon preparation - 11:59:00 AM Pacific (60 seconds before noon)
     log.debug('Setting up noon preparation cron job', {
-      schedule: '50 59 11 * * *',
+      schedule: '0 59 11 * * *',
       timezone: 'America/Los_Angeles',
     });
     const prepareJob = cron.schedule(
-      '50 59 11 * * *',
+      '0 59 11 * * *',
       async () => {
         log.info('=== NOON PREPARATION TRIGGERED ===');
         try {
@@ -144,7 +144,7 @@ export class SchedulerService {
       startTime: this.startTime.toISOString(),
     });
     log.info('Schedule:', {
-      noonPreparation: '11:59:50 AM Pacific',
+      noonPreparation: '11:59:00 AM Pacific (60s before noon)',
       noonExecution: '12:00:00 PM Pacific',
       pollingMode: 'Every 15 minutes',
     });

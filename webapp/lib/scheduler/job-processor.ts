@@ -49,9 +49,10 @@ function getMaxBookingDate(isResident: boolean): Date {
 /**
  * Calculate target date for booking (8 days ahead)
  * @param job - Booking job
+ * @param skipWindowCheck - Skip booking window validation (for noon mode prep)
  * @returns Date string in YYYY-MM-DD format, or null if no valid date
  */
-export function getTargetDate(job: JobWithAccount): string | null {
+export function getTargetDate(job: JobWithAccount, skipWindowCheck = false): string | null {
   const today = startOfDay(new Date());
   const targetDate = addDays(today, 8); // Book 8 days ahead
 
@@ -61,20 +62,24 @@ export function getTargetDate(job: JobWithAccount): string | null {
     today: format(today, 'yyyy-MM-dd'),
     targetDate: format(targetDate, 'yyyy-MM-dd'),
     targetDayName: format(targetDate, 'EEEE'),
+    skipWindowCheck,
   });
 
   // Check if target date is within booking window
-  const isResident = job.account.isResident ?? true;
-  const maxBookingDate = getMaxBookingDate(isResident);
+  // Skip this check for noon mode - we know the window opens at execution time (12:00 PM)
+  if (!skipWindowCheck) {
+    const isResident = job.account.isResident ?? true;
+    const maxBookingDate = getMaxBookingDate(isResident);
 
-  if (targetDate > maxBookingDate) {
-    log.debug('Target date beyond booking window', {
-      jobName: job.name,
-      targetDate: format(targetDate, 'yyyy-MM-dd'),
-      maxBookingDate: format(maxBookingDate, 'yyyy-MM-dd'),
-      isResident,
-    });
-    return null;
+    if (targetDate > maxBookingDate) {
+      log.debug('Target date beyond booking window', {
+        jobName: job.name,
+        targetDate: format(targetDate, 'yyyy-MM-dd'),
+        maxBookingDate: format(maxBookingDate, 'yyyy-MM-dd'),
+        isResident,
+      });
+      return null;
+    }
   }
 
   // For recurring jobs, check if target date matches one of the configured days

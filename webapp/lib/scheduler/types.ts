@@ -23,6 +23,7 @@ export interface PreparedJob {
   targetDate: string; // YYYY-MM-DD
   timeSlots: string[]; // HH:MM format, ordered by preference
   durations: number[]; // minutes, longest first
+  courtAvailability: Map<string, number[]>; // key: "HH:MM-duration" -> court IDs
 }
 
 export interface BookingAttempt {
