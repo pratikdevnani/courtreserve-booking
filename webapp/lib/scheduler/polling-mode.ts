@@ -338,6 +338,11 @@ export class PollingModeHandler {
           totalCombinations: timeSlots.length * durations.length,
         });
 
+        // Get minimum notice hours (default 6 if not set)
+        const minNoticeHours = ('minNoticeHours' in job && typeof job.minNoticeHours === 'number')
+          ? job.minNoticeHours
+          : 6;
+
         // Try slots SEQUENTIALLY (less aggressive than noon mode)
         let booked = false;
         for (const duration of durations) {
@@ -345,6 +350,29 @@ export class PollingModeHandler {
 
           for (const timeSlot of timeSlots) {
             if (booked) break;
+
+            // Check minimum notice requirement
+            const slotDateTime = new Date(`${targetDate}T${timeSlot}:00`);
+            const hoursUntilSlot = (slotDateTime.getTime() - Date.now()) / (1000 * 60 * 60);
+
+            if (hoursUntilSlot < minNoticeHours) {
+              log.debug('Skipping slot - insufficient notice', {
+                jobName: job.name,
+                targetDate,
+                timeSlot,
+                hoursUntilSlot: hoursUntilSlot.toFixed(1),
+                minNoticeHours,
+              });
+              attempts.push({
+                date: targetDate,
+                timeSlot,
+                duration,
+                success: false,
+                message: `Insufficient notice (${hoursUntilSlot.toFixed(1)}h < ${minNoticeHours}h)`,
+                timestamp: new Date(),
+              });
+              continue;
+            }
 
             try {
               // Check availability

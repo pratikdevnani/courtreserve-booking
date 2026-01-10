@@ -67,6 +67,7 @@ export async function POST(request: NextRequest) {
       strictDuration = false,
       maxBookingsPerDay = 1,
       priority = 0,
+      minNoticeHours = 6,
       // Legacy schema fields (optional for backward compatibility)
       slotMode,
       timeSlots,
@@ -120,6 +121,12 @@ export async function POST(request: NextRequest) {
           { status: 400 }
         );
       }
+      if (typeof minNoticeHours !== 'number' || minNoticeHours < 0) {
+        return NextResponse.json(
+          { error: 'Minimum notice hours must be a non-negative number' },
+          { status: 400 }
+        );
+      }
     } else {
       // Validate legacy schema fields
       if (!slotMode || !['single', 'multi'].includes(slotMode)) {
@@ -164,6 +171,7 @@ export async function POST(request: NextRequest) {
       data.strictDuration = strictDuration;
       data.maxBookingsPerDay = maxBookingsPerDay;
       data.priority = priority;
+      data.minNoticeHours = minNoticeHours;
       // Clear legacy fields
       data.slotMode = null;
       data.timeSlots = null;

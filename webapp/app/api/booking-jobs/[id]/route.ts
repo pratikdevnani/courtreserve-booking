@@ -102,6 +102,7 @@ export async function PATCH(
       updateData.strictDuration = body.strictDuration ?? false
       updateData.maxBookingsPerDay = body.maxBookingsPerDay ?? 1
       updateData.priority = body.priority ?? 0
+      updateData.minNoticeHours = body.minNoticeHours ?? 6
       // Clear legacy fields when using new schema
       updateData.slotMode = null
       updateData.timeSlots = null

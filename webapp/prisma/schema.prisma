@@ -88,6 +88,7 @@ model BookingJob {
   // NEW BEHAVIOR CONTROLS
   maxBookingsPerDay Int      @default(1)    // user configurable
   priority          Int      @default(0)    // higher = processed first at noon
+  minNoticeHours    Int      @default(6)    // minimum hours notice for polling mode
 
   // Status
   active          Boolean  @default(true)

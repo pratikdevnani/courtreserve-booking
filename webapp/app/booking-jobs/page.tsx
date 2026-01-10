@@ -35,6 +35,7 @@ type BookingJob = {
   strictDuration?: boolean | null
   maxBookingsPerDay?: number | null
   priority?: number | null
+  minNoticeHours?: number | null
   // Legacy fields (backward compat)
   slotMode?: string | null
   timeSlots?: string | null
@@ -94,6 +95,7 @@ export default function BookingJobsPage() {
     strictDuration: false,
     maxBookingsPerDay: 1,
     priority: 0,
+    minNoticeHours: 6,
   })
 
   const [newDay, setNewDay] = useState('')
@@ -181,13 +183,23 @@ export default function BookingJobsPage() {
     // Detect if job uses new schema
     const hasNewSchema = job.preferredTime !== null && job.preferredTime !== undefined
 
+    // Parse days - handle potential double-encoding
+    let parsedDays: string[]
+    try {
+      const firstParse = JSON.parse(job.days)
+      // If firstParse is a string, it was double-encoded
+      parsedDays = typeof firstParse === 'string' ? JSON.parse(firstParse) : firstParse
+    } catch {
+      parsedDays = []
+    }
+
     if (hasNewSchema) {
       setFormData({
         name: job.name,
         accountId: job.accountId,
         venue: job.venue,
         recurrence: job.recurrence,
-        days: JSON.parse(job.days),
+        days: parsedDays,
         active: job.active,
         preferredTime: job.preferredTime!,
         timeFlexibility: job.timeFlexibility ?? 30,
@@ -196,6 +208,7 @@ export default function BookingJobsPage() {
         strictDuration: job.strictDuration ?? false,
         maxBookingsPerDay: job.maxBookingsPerDay ?? 1,
         priority: job.priority ?? 0,
+        minNoticeHours: job.minNoticeHours ?? 6,
       })
     } else {
       // Legacy job - convert to new schema for editing
@@ -207,7 +220,7 @@ export default function BookingJobsPage() {
         accountId: job.accountId,
         venue: job.venue,
         recurrence: job.recurrence,
-        days: JSON.parse(job.days),
+        days: parsedDays,
         active: job.active,
         preferredTime: timeSlots[0]?.split('-')[0] || '18:00',
         timeFlexibility: timeSlots.length > 1 ? 30 : 0,
@@ -216,6 +229,7 @@ export default function BookingJobsPage() {
         strictDuration: durations.length === 1,
         maxBookingsPerDay: 1,
         priority: 0,
+        minNoticeHours: 6,
       })
     }
 
@@ -342,6 +356,7 @@ export default function BookingJobsPage() {
       strictDuration: false,
       maxBookingsPerDay: 1,
       priority: 0,
+      minNoticeHours: 6,
     })
     setNewDay('')
   }
@@ -661,6 +676,25 @@ export default function BookingJobsPage() {
                   />
                   <p className="mt-1 text-xs text-gray-400">
                     How many bookings to make for this job per day
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-1">
+                    Minimum Notice (hours)
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={72}
+                    value={formData.minNoticeHours}
+                    onChange={(e) =>
+                      setFormData({ ...formData, minNoticeHours: parseInt(e.target.value) || 0 })
+                    }
+                    className="block w-full rounded-md bg-gray-700 border-gray-600 text-gray-100 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm px-3 py-2 border"
+                  />
+                  <p className="mt-1 text-xs text-gray-400">
+                    Polling mode won&apos;t book slots less than this many hours away
                   </p>
                 </div>
 
