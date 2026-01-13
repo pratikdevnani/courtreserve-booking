@@ -36,18 +36,19 @@ export interface ApiClientConfig {
 }
 
 /**
- * Fetch with cookie management and logging
+ * Fetch with cookie management, logging, and timeout
  */
 async function fetchWithCookies(
   url: string,
   cookieManager: CookieManager,
   options: RequestInit = {},
-  depth: number = 0
+  depth: number = 0,
+  timeoutMs: number = 30000 // 30 second default timeout
 ): Promise<Response> {
   const requestId = Math.random().toString(36).substring(7);
   const method = options.method || 'GET';
 
-  log.trace(`[${requestId}] Starting request`, { method, url, depth });
+  log.trace(`[${requestId}] Starting request`, { method, url, depth, timeoutMs });
 
   const headers = new Headers(options.headers);
 
@@ -68,12 +69,22 @@ async function fetchWithCookies(
 
   const startTime = Date.now();
 
+  // Create AbortController for timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+    log.warn(`[${requestId}] Request timeout after ${timeoutMs}ms`, { url, method });
+  }, timeoutMs);
+
   try {
     const response = await fetch(url, {
       ...options,
       headers,
       redirect: 'manual', // Handle redirects manually to capture cookies
+      signal: controller.signal,
     });
+
+    clearTimeout(timeoutId);
 
     const elapsed = Date.now() - startTime;
     log.debug(`[${requestId}] Response received`, {
@@ -93,7 +104,7 @@ async function fetchWithCookies(
         if (depth > 5) {
           throw new Error('Too many redirects');
         }
-        return fetchWithCookies(location, cookieManager, options, depth + 1);
+        return fetchWithCookies(location, cookieManager, options, depth + 1, timeoutMs);
       }
     }
 
@@ -106,13 +117,24 @@ async function fetchWithCookies(
 
     return response;
   } catch (error) {
+    clearTimeout(timeoutId);
     const elapsed = Date.now() - startTime;
+
+    // Better error message for timeout
+    const isTimeout = error instanceof Error && error.name === 'AbortError';
+    const errorMessage = isTimeout
+      ? `Request timeout after ${timeoutMs}ms`
+      : error instanceof Error
+        ? error.message
+        : String(error);
+
     log.error(`[${requestId}] Request failed after ${elapsed}ms`, {
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage,
       url,
       method,
+      isTimeout,
     });
-    throw error;
+    throw new Error(errorMessage);
   }
 }
 
@@ -260,15 +282,17 @@ export async function getAvailableCourts(
   });
 
   // Build startDate in UTC format
-  const year = dateObj.getFullYear();
-  const month = dateObj.getMonth();
-  const day = dateObj.getDate();
+  // IMPORTANT: Use UTC methods because date strings like "2026-01-21" are parsed as UTC midnight,
+  // which becomes the previous day when converted to local time (e.g., PST)
+  const year = dateObj.getUTCFullYear();
+  const month = dateObj.getUTCMonth();
+  const day = dateObj.getUTCDate();
   const startDateUtc = new Date(Date.UTC(year, month, day, 8, 0, 0)).toISOString();
 
   // Format date string for API
   const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  const dateStr = `${dayNames[dateObj.getDay()]}, ${day.toString().padStart(2, '0')} ${monthNames[month]} ${year} 08:00:00 GMT`;
+  const dateStr = `${dayNames[dateObj.getUTCDay()]}, ${day.toString().padStart(2, '0')} ${monthNames[month]} ${year} 08:00:00 GMT`;
 
   const jsonData = {
     startDate: startDateUtc,
@@ -841,9 +865,10 @@ export function findReservationInTransactions(
   const dateObj = typeof date === 'string' ? new Date(date) : date;
 
   // Format date to match ReservationDateDisplay (e.g., "1/14/2026")
-  const month = dateObj.getMonth() + 1;
-  const day = dateObj.getDate();
-  const year = dateObj.getFullYear();
+  // Use UTC methods because date strings like "2026-01-21" are parsed as UTC midnight
+  const month = dateObj.getUTCMonth() + 1;
+  const day = dateObj.getUTCDate();
+  const year = dateObj.getUTCFullYear();
   const targetDateStr = `${month}/${day}/${year}`;
 
   // Parse startTime to 12-hour format for matching (e.g., "13:00" -> "1:00 PM")

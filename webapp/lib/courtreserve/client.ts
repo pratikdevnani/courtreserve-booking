@@ -25,6 +25,10 @@ export class CourtReserveClient {
   private loginAttempts: number = 0;
   private lastLoginTime: Date | null = null;
 
+  // Retry configuration
+  private static readonly MAX_LOGIN_RETRIES = 3;
+  private static readonly RETRY_DELAYS = [1000, 2000, 4000]; // 1s, 2s, 4s exponential backoff
+
   constructor(config: CourtReserveClientConfig) {
     log.debug('Creating CourtReserve client', {
       venue: config.venue,
@@ -53,58 +57,101 @@ export class CourtReserveClient {
   }
 
   /**
-   * Login to CourtReserve
+   * Login to CourtReserve with retry logic for transient failures
    */
   async login(): Promise<boolean> {
-    this.loginAttempts++;
-    log.info('Starting login', {
-      attempt: this.loginAttempts,
-      email: this.email,
-      venue: this.venue.name,
-    });
+    let lastError: Error | null = null;
 
-    const startTime = Date.now();
-
-    try {
-      // Initialize session first
-      log.debug('Initializing session...');
-      await api.initializeSession(this.getApiConfig());
-
-      // Perform login
-      log.debug('Performing login...');
-      const response = await api.login(this.getApiConfig(), this.email, this.password);
-
-      const elapsed = Date.now() - startTime;
-
-      if (response.IsValid) {
-        this.isAuthenticated = true;
-        this.lastLoginTime = new Date();
-        log.info('Login successful', {
-          email: this.email,
-          elapsed: `${elapsed}ms`,
-          attempt: this.loginAttempts,
-        });
-        return true;
-      } else {
-        this.isAuthenticated = false;
-        log.warn('Login failed - invalid response', {
-          message: response.Message,
-          email: this.email,
-          elapsed: `${elapsed}ms`,
-        });
-        throw new Error(response.Message || 'Login failed');
-      }
-    } catch (error) {
-      this.isAuthenticated = false;
-      const elapsed = Date.now() - startTime;
-      log.error('Login error', {
-        error: error instanceof Error ? error.message : String(error),
+    for (let attempt = 1; attempt <= CourtReserveClient.MAX_LOGIN_RETRIES; attempt++) {
+      this.loginAttempts++;
+      log.info('Starting login', {
+        attempt,
+        maxAttempts: CourtReserveClient.MAX_LOGIN_RETRIES,
         email: this.email,
-        elapsed: `${elapsed}ms`,
-        attempt: this.loginAttempts,
+        venue: this.venue.name,
       });
-      throw error;
+
+      const startTime = Date.now();
+
+      try {
+        // Initialize session first
+        log.debug('Initializing session...');
+        await api.initializeSession(this.getApiConfig());
+
+        // Perform login
+        log.debug('Performing login...');
+        const response = await api.login(this.getApiConfig(), this.email, this.password);
+
+        const elapsed = Date.now() - startTime;
+
+        if (response.IsValid) {
+          this.isAuthenticated = true;
+          this.lastLoginTime = new Date();
+          log.info('Login successful', {
+            email: this.email,
+            elapsed: `${elapsed}ms`,
+            attempt,
+          });
+          return true;
+        } else {
+          // Auth failure - don't retry (wrong credentials)
+          this.isAuthenticated = false;
+          log.warn('Login failed - invalid credentials', {
+            message: response.Message,
+            email: this.email,
+            elapsed: `${elapsed}ms`,
+          });
+          throw new Error(response.Message || 'Login failed - invalid credentials');
+        }
+      } catch (error) {
+        this.isAuthenticated = false;
+        const elapsed = Date.now() - startTime;
+        const errorMessage = error instanceof Error ? error.message : String(error);
+
+        log.error('Login error', {
+          error: errorMessage,
+          email: this.email,
+          elapsed: `${elapsed}ms`,
+          attempt,
+        });
+
+        // Don't retry auth failures (wrong password, invalid credentials)
+        const isAuthFailure =
+          errorMessage.toLowerCase().includes('invalid') ||
+          errorMessage.toLowerCase().includes('incorrect') ||
+          errorMessage.toLowerCase().includes('wrong') ||
+          errorMessage.toLowerCase().includes('credentials');
+
+        if (isAuthFailure) {
+          throw error;
+        }
+
+        lastError = error instanceof Error ? error : new Error(errorMessage);
+
+        // Retry transient errors (network, timeout) with exponential backoff
+        if (attempt < CourtReserveClient.MAX_LOGIN_RETRIES) {
+          const delay = CourtReserveClient.RETRY_DELAYS[attempt - 1];
+          log.info('Retrying login after transient error', {
+            attempt,
+            nextAttempt: attempt + 1,
+            delayMs: delay,
+            error: errorMessage,
+          });
+
+          // Clear cookies before retry (fresh session)
+          this.cookieManager.clear();
+
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
     }
+
+    // All retries exhausted
+    log.error('Login failed after all retries', {
+      attempts: CourtReserveClient.MAX_LOGIN_RETRIES,
+      email: this.email,
+    });
+    throw lastError || new Error('Login failed after all retries');
   }
 
   /**
