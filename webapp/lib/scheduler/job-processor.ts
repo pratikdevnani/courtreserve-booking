@@ -47,13 +47,25 @@ function getMaxBookingDate(isResident: boolean): Date {
 }
 
 /**
- * Calculate target date for booking (8 days ahead)
+ * Get today's date in Pacific timezone (where CourtReserve operates)
+ */
+function getTodayPacific(): Date {
+  const now = new Date();
+  // Get date string in Pacific timezone (YYYY-MM-DD format)
+  const pacificDateStr = now.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+  // Parse as a date (at midnight local time, but we only care about the date portion)
+  const [year, month, day] = pacificDateStr.split('-').map(Number);
+  return new Date(year, month - 1, day, 0, 0, 0, 0);
+}
+
+/**
+ * Calculate target date for booking (8 days ahead in Pacific time)
  * @param job - Booking job
  * @param skipWindowCheck - Skip booking window validation (for noon mode prep)
  * @returns Date string in YYYY-MM-DD format, or null if no valid date
  */
 export function getTargetDate(job: JobWithAccount, skipWindowCheck = false): string | null {
-  const today = startOfDay(new Date());
+  const today = getTodayPacific();
   const targetDate = addDays(today, 8); // Book 8 days ahead
 
   log.trace('Calculating target date', {
@@ -63,6 +75,7 @@ export function getTargetDate(job: JobWithAccount, skipWindowCheck = false): str
     targetDate: format(targetDate, 'yyyy-MM-dd'),
     targetDayName: format(targetDate, 'EEEE'),
     skipWindowCheck,
+    pacificTime: new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }),
   });
 
   // Check if target date is within booking window
