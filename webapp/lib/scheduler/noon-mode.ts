@@ -388,7 +388,7 @@ export class NoonModeHandler {
   /**
    * Execute a single job - Optimized serial execution with pre-fetched court IDs
    * No availability check at noon - uses pre-fetched court IDs from prep phase
-   * Retries if booking window not yet open (up to 10 seconds)
+   * Retries if booking window not yet open (up to 15 seconds)
    */
   private async executeJob(
     prepared: PreparedJob,
@@ -397,11 +397,10 @@ export class NoonModeHandler {
     const lockKey = `${prepared.job.accountId}-${prepared.job.venue}-${prepared.targetDate}`;
     const jobStartTime = Date.now();
     const attempts: BookingAttempt[] = [];
-    const deferredLogs: Array<{ level: 'info' | 'warn' | 'debug' | 'error'; msg: string; data: object }> = [];
 
-    // Retry config for window not open
-    const MAX_WINDOW_RETRIES = 10;
-    const WINDOW_RETRY_DELAY_MS = 1000; // 1 second between retries
+    // Retry config for window not open - keep retrying same court until window opens
+    const MAX_WINDOW_RETRY_MS = 15000; // 15 seconds max
+    const WINDOW_RETRY_DELAY_MS = 500; // 500ms between retries
 
     // Attempt to acquire lock (no logging in critical path)
     if (!lockManager.acquire(lockKey, prepared.job.id)) {
@@ -417,180 +416,194 @@ export class NoonModeHandler {
     }
 
     try {
+      // Get first available court to use for window-open detection
+      let firstCourtId: number | null = null;
+      let firstTimeSlot: string | null = null;
+      let firstDuration: number | null = null;
+
+      for (const duration of prepared.durations) {
+        for (const timeSlot of prepared.timeSlots) {
+          const key = `${timeSlot}-${duration}`;
+          const courtIds = prepared.courtAvailability.get(key) || [];
+          if (courtIds.length > 0) {
+            firstCourtId = courtIds[0];
+            firstTimeSlot = timeSlot;
+            firstDuration = duration;
+            break;
+          }
+        }
+        if (firstCourtId) break;
+      }
+
+      if (!firstCourtId || !firstTimeSlot || !firstDuration) {
+        log.warn('No courts available in pre-fetch', { jobName: prepared.job.name });
+        return {
+          jobId: prepared.job.id,
+          status: 'no_courts',
+          attempts: [],
+        };
+      }
+
+      // Phase 1: Wait for booking window to open by retrying first court
+      let windowOpen = false;
       let windowRetryCount = 0;
+      const windowStartTime = Date.now();
 
-      // Outer retry loop for "window not open" errors
-      while (windowRetryCount <= MAX_WINDOW_RETRIES) {
-        // Try durations in order (longest first: 120 → 90 → 60)
-        for (const duration of prepared.durations) {
-          // Try time slots in priority order (preferred first, then +30, -30, etc.)
-          for (const timeSlot of prepared.timeSlots) {
-            const key = `${timeSlot}-${duration}`;
-            const courtIds = prepared.courtAvailability.get(key) || [];
+      while (!windowOpen && (Date.now() - windowStartTime) < MAX_WINDOW_RETRY_MS) {
+        const result = await prepared.client.bookCourt({
+          date: prepared.targetDate,
+          startTime: firstTimeSlot,
+          duration: firstDuration,
+          courtId: firstCourtId,
+        });
 
-            if (courtIds.length === 0) continue;
+        attempts.push({
+          date: prepared.targetDate,
+          timeSlot: firstTimeSlot,
+          duration: firstDuration,
+          courtId: firstCourtId,
+          success: result.success,
+          message: result.message || (result.success ? 'Booked successfully' : 'Booking failed'),
+          timestamp: new Date(),
+          externalId: result.externalId,
+          confirmationNumber: result.confirmationNumber,
+        });
 
-            // Try ALL courts for this slot before moving to next slot
-            for (const courtId of courtIds) {
-              const result = await prepared.client.bookCourt({
-                date: prepared.targetDate,
-                startTime: timeSlot,
-                duration,
-                courtId,
-              });
+        if (result.success) {
+          // SUCCESS on first try!
+          log.info('BOOKING SUCCESS!', {
+            jobName: prepared.job.name,
+            date: prepared.targetDate,
+            timeSlot: firstTimeSlot,
+            duration: firstDuration,
+            courtId: firstCourtId,
+            totalAttempts: attempts.length,
+            windowRetries: windowRetryCount,
+            durationMs: Date.now() - jobStartTime,
+          });
 
-              attempts.push({
+          await this.handleSuccessfulBooking(prepared, attempts[attempts.length - 1], result);
+
+          return {
+            jobId: prepared.job.id,
+            status: 'success',
+            attempts,
+            courtId: firstCourtId,
+            date: prepared.targetDate,
+            startTime: firstTimeSlot,
+            duration: firstDuration,
+          };
+        }
+
+        // Check if window not open
+        if (result.windowClosed || result.message?.includes('only allowed to reserve up to')) {
+          windowRetryCount++;
+          log.info('Booking window not open yet - retrying', {
+            jobName: prepared.job.name,
+            retryCount: windowRetryCount,
+            elapsedMs: Date.now() - windowStartTime,
+            maxMs: MAX_WINDOW_RETRY_MS,
+            message: result.message,
+          });
+          await new Promise(resolve => setTimeout(resolve, WINDOW_RETRY_DELAY_MS));
+          continue;
+        }
+
+        // Window is open but court taken - move to phase 2
+        windowOpen = true;
+        log.info('Booking window is open, court taken - trying other courts', {
+          jobName: prepared.job.name,
+          windowRetries: windowRetryCount,
+          elapsedMs: Date.now() - windowStartTime,
+        });
+      }
+
+      // Check if we timed out waiting for window
+      if (!windowOpen && (Date.now() - windowStartTime) >= MAX_WINDOW_RETRY_MS) {
+        log.warn('Booking window still not open after max time', {
+          jobName: prepared.job.name,
+          totalRetries: windowRetryCount,
+          elapsedMs: Date.now() - windowStartTime,
+        });
+        return {
+          jobId: prepared.job.id,
+          status: 'window_closed',
+          attempts,
+          errorMessage: `Booking window not open after ${windowRetryCount} retries (${Math.round((Date.now() - windowStartTime) / 1000)}s)`,
+        };
+      }
+
+      // Phase 2: Window is open - try all courts/slots
+      for (const duration of prepared.durations) {
+        for (const timeSlot of prepared.timeSlots) {
+          const key = `${timeSlot}-${duration}`;
+          const courtIds = prepared.courtAvailability.get(key) || [];
+
+          if (courtIds.length === 0) continue;
+
+          for (const courtId of courtIds) {
+            // Skip if we already tried this exact combination
+            const alreadyTried = attempts.some(
+              a => a.courtId === courtId && a.timeSlot === timeSlot && a.duration === duration
+            );
+            if (alreadyTried) continue;
+
+            const result = await prepared.client.bookCourt({
+              date: prepared.targetDate,
+              startTime: timeSlot,
+              duration,
+              courtId,
+            });
+
+            attempts.push({
+              date: prepared.targetDate,
+              timeSlot,
+              duration,
+              courtId,
+              success: result.success,
+              message: result.message || (result.success ? 'Booked successfully' : 'Booking failed'),
+              timestamp: new Date(),
+              externalId: result.externalId,
+              confirmationNumber: result.confirmationNumber,
+            });
+
+            if (result.success) {
+              log.info('BOOKING SUCCESS!', {
+                jobName: prepared.job.name,
                 date: prepared.targetDate,
                 timeSlot,
                 duration,
                 courtId,
-                success: result.success,
-                message: result.message || (result.success ? 'Booked successfully' : 'Booking failed'),
-                timestamp: new Date(),
-                externalId: result.externalId,
-                confirmationNumber: result.confirmationNumber,
+                totalAttempts: attempts.length,
+                windowRetries: windowRetryCount,
+                durationMs: Date.now() - jobStartTime,
               });
 
-              if (result.success) {
-                // SUCCESS - defer logging, handle post-booking tasks
-                deferredLogs.push({
-                  level: 'info',
-                  msg: 'BOOKING SUCCESS!',
-                  data: {
-                    jobName: prepared.job.name,
-                    date: prepared.targetDate,
-                    timeSlot,
-                    duration,
-                    courtId,
-                    totalAttempts: attempts.length,
-                    windowRetries: windowRetryCount,
-                    durationMs: Date.now() - jobStartTime,
-                  },
-                });
+              await this.handleSuccessfulBooking(prepared, attempts[attempts.length - 1], result);
 
-                // Fetch reservation details if not returned
-                let externalId = result.externalId;
-                let confirmationNumber = result.confirmationNumber;
-
-                if (!externalId) {
-                  const details = await prepared.client.fetchReservationDetails(
-                    prepared.targetDate,
-                    timeSlot
-                  );
-                  if (details) {
-                    externalId = details.externalId;
-                    confirmationNumber = details.confirmationNumber;
-                  }
-                }
-
-                // Record reservation to database
-                await recordReservation(
-                  prepared.job,
-                  attempts[attempts.length - 1],
-                  externalId,
-                  confirmationNumber
-                );
-
-                // Update job timestamps
-                await updateJobTimestamps(prepared.job.id, prepared.job.recurrence);
-
-                // Archive if one-time job
-                if (prepared.job.recurrence === 'once') {
-                  await archiveJob(prepared.job.id);
-                }
-
-                // Flush deferred logs
-                this.flushLogs(deferredLogs);
-
-                return {
-                  jobId: prepared.job.id,
-                  status: 'success',
-                  attempts,
-                  courtId,
-                  date: prepared.targetDate,
-                  startTime: timeSlot,
-                  duration,
-                };
-              }
-
-              // If window not open, retry after delay
-              if (result.windowClosed || result.message?.includes('only allowed to reserve up to')) {
-                windowRetryCount++;
-                if (windowRetryCount <= MAX_WINDOW_RETRIES) {
-                  deferredLogs.push({
-                    level: 'info',
-                    msg: 'Booking window not open yet - retrying',
-                    data: {
-                      jobName: prepared.job.name,
-                      retryCount: windowRetryCount,
-                      maxRetries: MAX_WINDOW_RETRIES,
-                      message: result.message,
-                    },
-                  });
-                  // Wait before retry
-                  await new Promise(resolve => setTimeout(resolve, WINDOW_RETRY_DELAY_MS));
-                  // Break out of all inner loops to restart from the beginning
-                  break;
-                } else {
-                  deferredLogs.push({
-                    level: 'warn',
-                    msg: 'Booking window still not open after max retries',
-                    data: {
-                      jobName: prepared.job.name,
-                      totalRetries: windowRetryCount,
-                      timeSlot,
-                      message: result.message,
-                    },
-                  });
-                  this.flushLogs(deferredLogs);
-
-                  return {
-                    jobId: prepared.job.id,
-                    status: 'window_closed',
-                    attempts,
-                    errorMessage: `Booking window not open after ${MAX_WINDOW_RETRIES} retries`,
-                  };
-                }
-              }
-
-              // Court taken - immediately try next court (no delay, no logging)
+              return {
+                jobId: prepared.job.id,
+                status: 'success',
+                attempts,
+                courtId,
+                date: prepared.targetDate,
+                startTime: timeSlot,
+                duration,
+              };
             }
-            // If we broke out for window retry, break this loop too
-            if (windowRetryCount > 0 && windowRetryCount <= MAX_WINDOW_RETRIES && 
-                attempts.length > 0 && 
-                (attempts[attempts.length - 1].message?.includes('only allowed to reserve up to'))) {
-              break;
-            }
+            // Court taken - immediately try next court (no delay)
           }
-          // If we broke out for window retry, break this loop too  
-          if (windowRetryCount > 0 && windowRetryCount <= MAX_WINDOW_RETRIES && 
-              attempts.length > 0 && 
-              (attempts[attempts.length - 1].message?.includes('only allowed to reserve up to'))) {
-            break;
-          }
-        }
-
-        // If we didn't break for window retry, we've exhausted all options
-        if (windowRetryCount === 0 || 
-            (attempts.length > 0 && 
-             !attempts[attempts.length - 1].message?.includes('only allowed to reserve up to'))) {
-          break;
         }
       }
 
       // All courts/slots exhausted
-      deferredLogs.push({
-        level: 'warn',
-        msg: 'All slots failed',
-        data: {
-          jobName: prepared.job.name,
-          targetDate: prepared.targetDate,
-          totalAttempts: attempts.length,
-          windowRetries: windowRetryCount,
-          durationMs: Date.now() - jobStartTime,
-        },
+      log.warn('All slots failed', {
+        jobName: prepared.job.name,
+        targetDate: prepared.targetDate,
+        totalAttempts: attempts.length,
+        windowRetries: windowRetryCount,
+        durationMs: Date.now() - jobStartTime,
       });
-      this.flushLogs(deferredLogs);
 
       return {
         jobId: prepared.job.id,
@@ -598,16 +611,11 @@ export class NoonModeHandler {
         attempts,
       };
     } catch (error) {
-      deferredLogs.push({
-        level: 'error',
-        msg: 'Job execution error',
-        data: {
-          jobName: prepared.job.name,
-          error: error instanceof Error ? error.message : String(error),
-          durationMs: Date.now() - jobStartTime,
-        },
+      log.error('Job execution error', {
+        jobName: prepared.job.name,
+        error: error instanceof Error ? error.message : String(error),
+        durationMs: Date.now() - jobStartTime,
       });
-      this.flushLogs(deferredLogs);
 
       return {
         jobId: prepared.job.id,
@@ -618,6 +626,36 @@ export class NoonModeHandler {
     } finally {
       // Always release the lock
       lockManager.release(lockKey, prepared.job.id);
+    }
+  }
+
+  /**
+   * Handle successful booking - record to DB, update timestamps, archive if one-time
+   */
+  private async handleSuccessfulBooking(
+    prepared: PreparedJob,
+    attempt: BookingAttempt,
+    result: { externalId?: string; confirmationNumber?: string }
+  ): Promise<void> {
+    let externalId = result.externalId;
+    let confirmationNumber = result.confirmationNumber;
+
+    if (!externalId) {
+      const details = await prepared.client.fetchReservationDetails(
+        prepared.targetDate,
+        attempt.timeSlot
+      );
+      if (details) {
+        externalId = details.externalId;
+        confirmationNumber = details.confirmationNumber;
+      }
+    }
+
+    await recordReservation(prepared.job, attempt, externalId, confirmationNumber);
+    await updateJobTimestamps(prepared.job.id, prepared.job.recurrence);
+
+    if (prepared.job.recurrence === 'once') {
+      await archiveJob(prepared.job.id);
     }
   }
 
