@@ -13,12 +13,17 @@ export async function GET(request: NextRequest) {
     const accountId = searchParams.get('accountId')
     const venue = searchParams.get('venue')
     const includeServer = searchParams.get('includeServer') !== 'false'
+    const includePast = searchParams.get('includePast') === 'true'
+
+    // Get today's date in YYYY-MM-DD format for filtering
+    const today = new Date().toISOString().split('T')[0]
 
     // Fetch local DB reservations
     const localReservations = await prisma.reservation.findMany({
       where: {
         ...(accountId && { accountId }),
         ...(venue && { venue }),
+        ...(!includePast && { date: { gte: today } }),
       },
       include: {
         account: {
@@ -37,10 +42,9 @@ export async function GET(request: NextRequest) {
           },
         },
       },
-      orderBy: [
-        { date: 'desc' },
-        { startTime: 'desc' },
-      ],
+      orderBy: includePast
+        ? [{ date: 'desc' }, { startTime: 'desc' }]
+        : [{ date: 'asc' }, { startTime: 'asc' }],
     })
 
     // If not including server data, return local only
@@ -130,6 +134,9 @@ export async function GET(request: NextRequest) {
         // Parse date and time from server response
         const { date, startTime, duration } = parseServerReservation(serverRes)
 
+        // Skip past reservations if not including them
+        if (!includePast && date < today) continue
+
         mergedReservations.push({
           id: `ext-${externalId}`,
           source: 'external' as const,
@@ -156,11 +163,19 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Sort by date and time
+    // Sort by date and time (ascending for upcoming, descending for past)
     mergedReservations.sort((a, b) => {
-      const dateCompare = b.date.localeCompare(a.date)
-      if (dateCompare !== 0) return dateCompare
-      return b.startTime.localeCompare(a.startTime)
+      if (includePast) {
+        // Past reservations: newest first
+        const dateCompare = b.date.localeCompare(a.date)
+        if (dateCompare !== 0) return dateCompare
+        return b.startTime.localeCompare(a.startTime)
+      } else {
+        // Upcoming reservations: soonest first
+        const dateCompare = a.date.localeCompare(b.date)
+        if (dateCompare !== 0) return dateCompare
+        return a.startTime.localeCompare(b.startTime)
+      }
     })
 
     return NextResponse.json(mergedReservations)

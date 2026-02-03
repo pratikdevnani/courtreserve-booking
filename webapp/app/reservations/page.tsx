@@ -113,7 +113,7 @@ export default function ReservationsPage() {
         <div className="sm:flex-auto">
           <h1 className="text-3xl font-semibold text-gray-100">Reservations</h1>
           <p className="mt-2 text-sm text-gray-400">
-            All reservations made by this software
+            Upcoming reservations
           </p>
         </div>
         <div className="mt-4 sm:mt-0 sm:ml-16">
