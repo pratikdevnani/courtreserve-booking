@@ -10,7 +10,15 @@
  * - SILENT (5): No logging
  *
  * Set via LOG_LEVEL environment variable (default: INFO)
+ * 
+ * File logging:
+ * - Logs are written to /app/data/logs/ directory
+ * - Files are named by date: YYYY-MM-DD.log
+ * - Set LOG_TO_FILE=true to enable (default: true in production)
  */
+
+import * as fs from 'fs';
+import * as path from 'path';
 
 export enum LogLevel {
   TRACE = 0,
@@ -40,6 +48,43 @@ const LOG_LEVEL_COLORS: Record<LogLevel, string> = {
 };
 
 const RESET_COLOR = '\x1b[0m';
+
+// File logging configuration
+const LOG_DIR = process.env.LOG_DIR || '/app/data/logs';
+const LOG_TO_FILE = process.env.LOG_TO_FILE !== 'false'; // Default true
+
+// Ensure log directory exists
+function ensureLogDir(): void {
+  try {
+    if (!fs.existsSync(LOG_DIR)) {
+      fs.mkdirSync(LOG_DIR, { recursive: true });
+    }
+  } catch (error) {
+    console.error('Failed to create log directory:', error);
+  }
+}
+
+// Get today's log file path (in Pacific time)
+function getLogFilePath(): string {
+  const now = new Date();
+  const pacificDate = now.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+  return path.join(LOG_DIR, `${pacificDate}.log`);
+}
+
+// Write to log file (without ANSI color codes)
+function writeToFile(message: string): void {
+  if (!LOG_TO_FILE) return;
+  
+  try {
+    ensureLogDir();
+    // Strip ANSI color codes for file output
+    const cleanMessage = message.replace(/\x1b\[[0-9;]*m/g, '');
+    fs.appendFileSync(getLogFilePath(), cleanMessage + '\n');
+  } catch (error) {
+    // Silently fail - don't want logging errors to break the app
+    console.error('Failed to write to log file:', error);
+  }
+}
 
 function parseLogLevel(level: string | undefined): LogLevel {
   if (!level) return LogLevel.INFO;
@@ -111,6 +156,7 @@ export class Logger {
 
     const formatted = this.formatMessage(level, message, data);
 
+    // Write to console
     switch (level) {
       case LogLevel.ERROR:
         console.error(formatted);
@@ -121,6 +167,9 @@ export class Logger {
       default:
         console.log(formatted);
     }
+
+    // Write to file
+    writeToFile(formatted);
   }
 
   /**

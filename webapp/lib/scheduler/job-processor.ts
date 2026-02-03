@@ -55,7 +55,19 @@ function getTodayPacific(): Date {
   const pacificDateStr = now.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
   // Parse as a date (at midnight local time, but we only care about the date portion)
   const [year, month, day] = pacificDateStr.split('-').map(Number);
-  return new Date(year, month - 1, day, 0, 0, 0, 0);
+  const result = new Date(year, month - 1, day, 0, 0, 0, 0);
+  
+  // Diagnostic logging
+  log.debug('getTodayPacific calculation', {
+    nowUTC: now.toISOString(),
+    nowPST: now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }),
+    nowLocal: now.toString(),
+    pacificDateStr,
+    resultLocal: result.toString(),
+    resultUTC: result.toISOString(),
+  });
+  
+  return result;
 }
 
 /**

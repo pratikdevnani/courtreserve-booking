@@ -552,9 +552,27 @@ export async function fetchReservationForm(
   log.trace('Form field names', { fields: Object.keys(formData) });
 
   if (!formData.__RequestVerificationToken) {
-    log.error('Could not find CSRF token in form');
-    log.trace('Form HTML preview', { html: formHtml.substring(0, 1000) });
-    throw new Error('Could not find CSRF token in form');
+    // Try to extract error message from CourtReserve warning modal
+    let errorMessage = 'Could not find CSRF token in form';
+    const errorMatch = formHtml.match(/class="[^"]*error[^"]*"[^>]*>([^<]+)</i) 
+      || formHtml.match(/<span[^>]*>([^<]*warning[^<]*)<\/span>/i)
+      || formHtml.match(/modal-title-span[^>]*>([^<]+)</);
+    
+    // Try to find the actual error content in the modal body
+    const bodyMatch = formHtml.match(/error-inner[^>]*>([\s\S]*?)<\/div>/i)
+      || formHtml.match(/outer-inner-container[^>]*>([\s\S]*?)<\/div>\s*<\/div>\s*<\/div>/i);
+    
+    if (bodyMatch) {
+      // Strip HTML tags and clean up whitespace
+      const cleanText = bodyMatch[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      if (cleanText.length > 10) {
+        errorMessage = `CourtReserve error: ${cleanText.substring(0, 500)}`;
+      }
+    }
+    
+    log.error(errorMessage);
+    log.trace('Form HTML preview', { html: formHtml.substring(0, 2000) });
+    throw new Error(errorMessage);
   }
 
   return formData;

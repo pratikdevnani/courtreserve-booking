@@ -9,14 +9,17 @@
 ```
 
 **Deploying/restarting the container:**
-Always use docker-compose to preserve data volumes:
+Always use docker-compose from ~/Desktop/containers to preserve volumes and network config:
 ```bash
-cd webapp
-docker-compose pull
-docker-compose up -d
+cd ~/Desktop/containers
+docker compose pull pickleball
+docker compose up -d pickleball
 ```
 
-**NEVER recreate the container manually with `docker run`** - this will use wrong volume mounts and cause data loss. The docker-compose.yml has the correct bind mount configuration.
+**NEVER recreate the container manually with `docker run`** - this will:
+- Use wrong volume mounts (data is in ~/Desktop/containers/pickleball-data, not ~/Desktop/courtreserve-data)
+- Lose the Docker network connection to Caddy (containers_container_bridge), causing 502 errors
+- The docker-compose.yml in ~/Desktop/containers has the correct configuration
 
 ## Database Operations
 
