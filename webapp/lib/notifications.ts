@@ -300,6 +300,47 @@ export async function notifyReservationCancelled(params: {
 }
 
 /**
+ * Send a reservation reminder notification (day before)
+ */
+export async function notifyReservationReminder(params: {
+  reservations: Array<{
+    venue: string;
+    date: string;
+    time: string;
+    duration: number;
+    courtId?: string;
+  }>;
+}): Promise<boolean> {
+  if (params.reservations.length === 0) {
+    return false;
+  }
+
+  const lines = [
+    `You have ${params.reservations.length} reservation${params.reservations.length > 1 ? 's' : ''} tomorrow:`,
+    ``,
+  ];
+
+  for (const res of params.reservations) {
+    lines.push(`- **${res.venue}** at ${res.time} (${res.duration}min)${res.courtId ? ` - Court ${res.courtId}` : ''}`);
+  }
+
+  return sendNotification(lines.join('\n'), {
+    title: `Reminder: ${params.reservations.length} Court${params.reservations.length > 1 ? 's' : ''} Booked Tomorrow`,
+    priority: 'default',
+    tags: ['calendar', 'bell'],
+    markdown: true,
+    click: `${NTFY_CLICK_BASE_URL}/reservations`,
+    actions: [
+      {
+        action: 'view',
+        label: 'View Reservations',
+        url: `${NTFY_CLICK_BASE_URL}/reservations`,
+      },
+    ],
+  });
+}
+
+/**
  * Test the notification configuration
  */
 export async function testNotification(): Promise<boolean> {

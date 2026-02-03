@@ -22,7 +22,9 @@ import {
   shouldRecordHistory,
   recordRunHistory,
 } from './job-processor';
-import { notifyBookingFailure, isNotificationConfigured } from '../notifications';
+import { notifyBookingFailure, notifyReservationReminder, isNotificationConfigured } from '../notifications';
+import { prisma } from '../prisma';
+import { addDays, format } from 'date-fns';
 import { createLogger } from '../logger';
 
 const log = createLogger('Scheduler:NoonMode');
@@ -41,6 +43,30 @@ export class NoonModeHandler {
   async prepare(): Promise<void> {
     log.info('=== NOON PREPARATION STARTING ===');
     const prepareStartTime = Date.now();
+
+    // Clear any stale prepared jobs from previous runs
+    if (this.preparedJobs.size > 0) {
+      log.warn('Clearing stale prepared jobs from previous run', {
+        staleJobCount: this.preparedJobs.size,
+      });
+      this.preparedJobs.clear();
+    }
+
+    // Diagnostic logging for timezone debugging
+    const now = new Date();
+    const pacificDateStr = now.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+    log.info('=== TIMEZONE DIAGNOSTIC ===', {
+      systemTZ: process.env.TZ || 'not set',
+      currentTimeUTC: now.toISOString(),
+      currentTimePST: now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }),
+      currentTimeLocal: now.toString(),
+      pacificDateString: pacificDateStr,
+      expectedTargetDate: (() => {
+        const [y, m, d] = pacificDateStr.split('-').map(Number);
+        const target = new Date(y, m - 1, d + 8);
+        return target.toLocaleDateString('en-CA');
+      })(),
+    });
 
     try {
       // Fetch all active jobs sorted by priority
@@ -382,6 +408,9 @@ export class NoonModeHandler {
       avgDurationPerJob: Math.round(executeTime / jobResults.length),
     });
 
+    // Send reminders for tomorrow's reservations
+    await this.sendTomorrowReminders();
+
     return jobResults;
   }
 
@@ -673,5 +702,65 @@ export class NoonModeHandler {
    */
   getPreparedJobCount(): number {
     return this.preparedJobs.size;
+  }
+
+  /**
+   * Send reminders for reservations happening tomorrow
+   */
+  private async sendTomorrowReminders(): Promise<void> {
+    if (!isNotificationConfigured()) {
+      log.debug('Notifications not configured, skipping reminders');
+      return;
+    }
+
+    try {
+      // Calculate tomorrow's date in Pacific timezone
+      const now = new Date();
+      const pacificDateStr = now.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+      const [year, month, day] = pacificDateStr.split('-').map(Number);
+      const today = new Date(year, month - 1, day);
+      const tomorrow = addDays(today, 1);
+      const tomorrowStr = format(tomorrow, 'yyyy-MM-dd');
+
+      log.debug('Checking for tomorrow reservations', { tomorrowDate: tomorrowStr });
+
+      // Fetch reservations for tomorrow
+      const reservations = await prisma.reservation.findMany({
+        where: {
+          date: tomorrowStr,
+        },
+        orderBy: {
+          startTime: 'asc',
+        },
+      });
+
+      if (reservations.length === 0) {
+        log.debug('No reservations tomorrow, no reminder needed');
+        return;
+      }
+
+      log.info('Sending reminder for tomorrow reservations', {
+        count: reservations.length,
+        date: tomorrowStr,
+      });
+
+      await notifyReservationReminder({
+        reservations: reservations.map((r) => ({
+          venue: r.venue,
+          date: r.date,
+          time: r.startTime,
+          duration: r.duration,
+          courtId: r.courtId || undefined,
+        })),
+      });
+
+      log.info('Tomorrow reminder sent successfully', {
+        reservationCount: reservations.length,
+      });
+    } catch (error) {
+      log.error('Failed to send tomorrow reminders', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 }
