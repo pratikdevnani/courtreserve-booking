@@ -3,7 +3,7 @@
  */
 
 import { BookingJob } from '@prisma/client';
-import { CourtReserveClient } from '../courtreserve';
+import { CourtReserveClient, PreFetchedForm } from '../courtreserve';
 
 export type SchedulerMode = 'noon' | 'polling' | 'manual';
 
@@ -24,6 +24,7 @@ export interface PreparedJob {
   timeSlots: string[]; // HH:MM format, ordered by preference
   durations: number[]; // minutes, longest first
   courtAvailability: Map<string, number[]>; // key: "HH:MM-duration" -> court IDs
+  preFetchedForms: Map<string, PreFetchedForm>; // key: "HH:MM-duration-courtId" -> pre-fetched form data
 }
 
 export interface BookingAttempt {

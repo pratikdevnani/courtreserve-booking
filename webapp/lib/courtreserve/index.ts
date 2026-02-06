@@ -27,6 +27,10 @@ export type {
   LoginResponse,
   ReservationFormData,
   CreateReservationResponse,
+  PreFetchedForm,
 } from './types';
 
 export { VENUES, API_DOMAINS, USER_AGENT, TIMEZONE } from './types';
+
+// Export API functions needed for pre-fetching forms
+export { fetchReservationForm, submitReservationWithForm } from './api';

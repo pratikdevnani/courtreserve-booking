@@ -687,6 +687,109 @@ export async function createReservation(
 }
 
 /**
+ * Submit a reservation using pre-fetched form data (fast path)
+ * This skips the form-fetching step and submits the POST directly
+ * Used during noon mode execution when forms were pre-fetched during prep phase
+ */
+export async function submitReservationWithForm(
+  config: ApiClientConfig,
+  preFetchedFormData: ReservationFormData,
+  date: Date | string,
+  startTime: string,
+  duration: number,
+  courtId: number
+): Promise<CreateReservationResponse> {
+  log.info('Submitting reservation with pre-fetched form', {
+    venue: config.venue.name,
+    date: formatDate(date),
+    startTime,
+    duration,
+    courtId,
+  });
+
+  const endTime12 = calculateEndTime(startTime, duration);
+  const startTime24 = addSeconds(startTime);
+
+  // Merge pre-fetched form data with booking params
+  const postData = {
+    ...preFetchedFormData,
+    ReservationTypeId: config.venue.reservationTypeId,
+    Duration: duration.toString(),
+    CourtId: courtId.toString(),
+    StartTime: startTime24,
+    EndTime: endTime12,
+    DisclosureAgree: 'true',
+  };
+
+  log.trace('Pre-fetched form reservation post data', {
+    courtId,
+    startTime: startTime24,
+    endTime: endTime12,
+    duration,
+    reservationTypeId: config.venue.reservationTypeId,
+    fieldCount: Object.keys(postData).length,
+  });
+
+  // Convert to form-urlencoded
+  const formBody = new URLSearchParams();
+  for (const [key, value] of Object.entries(postData)) {
+    formBody.append(key, value);
+  }
+
+  const url = `${API_DOMAINS.reservations}/Online/ReservationsApi/CreateReservation/${config.venue.orgId}?uiCulture=${UI_CULTURE}`;
+  log.debug('Submitting reservation (fast path)', { url });
+
+  const submitStartTime = Date.now();
+  const response = await fetchWithCookies(url, config.cookieManager, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      'X-Requested-With': 'XMLHttpRequest',
+      Referer: `${API_DOMAINS.main}/`,
+    },
+    body: formBody.toString(),
+  });
+  const submitElapsed = Date.now() - submitStartTime;
+
+  if (!response.ok) {
+    log.error('Create reservation HTTP error (fast path)', {
+      status: response.status,
+      statusText: response.statusText,
+    });
+    throw new Error(`Create reservation failed: ${response.status}`);
+  }
+
+  const data: CreateReservationResponse = await response.json();
+
+  log.debug('CreateReservation API response (fast path)', {
+    fullResponse: JSON.stringify(data),
+    responseKeys: Object.keys(data),
+  });
+
+  if (data.isValid) {
+    log.info('RESERVATION SUCCESSFUL (fast path)!', {
+      courtId,
+      date: formatDate(date),
+      startTime,
+      duration,
+      elapsed: `${submitElapsed}ms`,
+      reservationId: data.reservationId,
+      confirmationNumber: data.confirmationNumber,
+    });
+  } else {
+    log.warn('Reservation failed (fast path)', {
+      message: data.message,
+      courtId,
+      date: formatDate(date),
+      startTime,
+      elapsed: `${submitElapsed}ms`,
+    });
+  }
+
+  return data;
+}
+
+/**
  * Cancel a reservation on CourtReserve
  */
 export async function cancelReservation(

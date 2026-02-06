@@ -5,7 +5,7 @@
 
 import { CookieManager } from './auth';
 import * as api from './api';
-import { BookingParams, BookingResult, Court, VENUES, VenueConfig } from './types';
+import { BookingParams, BookingResult, Court, PreFetchedForm, VENUES, VenueConfig } from './types';
 import { createLogger } from '../logger';
 
 const log = createLogger('CourtReserve:Client');
@@ -425,6 +425,202 @@ export class CourtReserveClient {
       const errorMessage = error instanceof Error ? error.message : String(error);
       log.error('Failed to fetch reservation details', { error: errorMessage });
       return null;
+    }
+  }
+
+  /**
+   * Pre-fetch the booking form for a specific court/time/duration
+   * Called during prep phase at 11:59 to avoid form-fetching latency at noon
+   */
+  async prefetchBookingForm(
+    date: string,
+    startTime: string,
+    duration: number,
+    courtId: number
+  ): Promise<PreFetchedForm> {
+    log.debug('Pre-fetching booking form', {
+      date,
+      startTime,
+      duration,
+      courtId,
+      venue: this.venue.name,
+    });
+
+    await this.ensureAuthenticated();
+
+    const fetchStartTime = Date.now();
+    const formData = await api.fetchReservationForm(this.getApiConfig(), date, startTime, duration);
+    const fetchElapsed = Date.now() - fetchStartTime;
+
+    log.debug('Booking form pre-fetched', {
+      date,
+      startTime,
+      duration,
+      courtId,
+      elapsed: `${fetchElapsed}ms`,
+      hasCSRFToken: !!formData.__RequestVerificationToken,
+    });
+
+    return {
+      formData,
+      timeSlot: startTime,
+      duration,
+      courtId,
+      fetchedAt: new Date(),
+    };
+  }
+
+  /**
+   * Book a court using pre-fetched form data (fast path)
+   * Falls back to regular bookCourt() if pre-fetched form fails
+   */
+  async bookCourtWithPrefetchedForm(
+    params: BookingParams,
+    preFetchedForm: PreFetchedForm
+  ): Promise<BookingResult> {
+    log.info('Attempting to book court with pre-fetched form', {
+      date: params.date,
+      startTime: params.startTime,
+      duration: params.duration,
+      courtId: params.courtId,
+      venue: this.venue.name,
+      formAge: `${Date.now() - preFetchedForm.fetchedAt.getTime()}ms`,
+    });
+
+    const startTime = Date.now();
+    await this.ensureAuthenticated();
+
+    try {
+      log.debug('Submitting reservation with pre-fetched form (fast path)...');
+      const response = await api.submitReservationWithForm(
+        this.getApiConfig(),
+        preFetchedForm.formData,
+        params.date,
+        params.startTime,
+        params.duration,
+        params.courtId
+      );
+
+      const elapsed = Date.now() - startTime;
+
+      if (response.isValid) {
+        log.info('BOOKING SUCCESSFUL (fast path)!', {
+          date: params.date,
+          startTime: params.startTime,
+          duration: params.duration,
+          courtId: params.courtId,
+          externalId: response.reservationId,
+          confirmationNumber: response.confirmationNumber,
+          elapsed: `${elapsed}ms`,
+        });
+        return {
+          success: true,
+          courtId: params.courtId,
+          message: 'Booking successful',
+          externalId: response.reservationId,
+          confirmationNumber: response.confirmationNumber,
+        };
+      } else {
+        const message = response.message || 'Booking failed';
+
+        // Check if this is a booking window error
+        if (message.toLowerCase().includes('only allowed to reserve up to')) {
+          log.info('Booking window not yet open (fast path)', {
+            date: params.date,
+            startTime: params.startTime,
+            message,
+            elapsed: `${elapsed}ms`,
+          });
+          return {
+            success: false,
+            message: 'Booking window not yet open',
+            windowClosed: true,
+            error: message,
+          };
+        }
+
+        // Check if this might be a form/CSRF error that warrants fallback
+        const isFormError = 
+          message.toLowerCase().includes('token') ||
+          message.toLowerCase().includes('expired') ||
+          message.toLowerCase().includes('session') ||
+          message.toLowerCase().includes('antiforgery') ||
+          message.toLowerCase().includes('verification');
+
+        if (isFormError) {
+          log.warn('Pre-fetched form may be stale, falling back to slow path', {
+            message,
+            date: params.date,
+            startTime: params.startTime,
+            formAge: `${Date.now() - preFetchedForm.fetchedAt.getTime()}ms`,
+          });
+          // Fall back to regular booking which fetches fresh form
+          return await this.bookCourt(params);
+        }
+
+        log.warn('Booking rejected by server (fast path)', {
+          message,
+          date: params.date,
+          startTime: params.startTime,
+          elapsed: `${elapsed}ms`,
+        });
+        return {
+          success: false,
+          message,
+          error: message,
+        };
+      }
+    } catch (error) {
+      const elapsed = Date.now() - startTime;
+      const errorMessage = error instanceof Error ? error.message : String(error);
+
+      // Check if it's a booking window error
+      if (errorMessage.toLowerCase().includes('only allowed to reserve up to')) {
+        log.info('Booking window not yet open (fast path)', {
+          date: params.date,
+          startTime: params.startTime,
+          elapsed: `${elapsed}ms`,
+        });
+        return {
+          success: false,
+          message: 'Booking window not yet open',
+          error: errorMessage,
+        };
+      }
+
+      // Check if this might be a form/CSRF/auth error that warrants fallback
+      const isRecoverableError =
+        errorMessage.includes('401') ||
+        errorMessage.includes('403') ||
+        errorMessage.toLowerCase().includes('token') ||
+        errorMessage.toLowerCase().includes('expired') ||
+        errorMessage.toLowerCase().includes('session') ||
+        errorMessage.toLowerCase().includes('csrf');
+
+      if (isRecoverableError) {
+        log.warn('Error with pre-fetched form, falling back to slow path', {
+          error: errorMessage,
+          date: params.date,
+          startTime: params.startTime,
+          formAge: `${Date.now() - preFetchedForm.fetchedAt.getTime()}ms`,
+        });
+        // Refresh session and fall back to regular booking
+        await this.refreshSession();
+        return await this.bookCourt(params);
+      }
+
+      log.error('Booking failed with error (fast path)', {
+        error: errorMessage,
+        date: params.date,
+        startTime: params.startTime,
+        elapsed: `${elapsed}ms`,
+      });
+
+      return {
+        success: false,
+        message: errorMessage,
+        error: errorMessage,
+      };
     }
   }
 }

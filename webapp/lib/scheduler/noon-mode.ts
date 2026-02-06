@@ -8,7 +8,7 @@
  * - Deferred logging (no I/O blocking during booking)
  */
 
-import { CourtReserveClient, generateTimeSlots, generateDurations } from '../courtreserve';
+import { CourtReserveClient, generateTimeSlots, generateDurations, PreFetchedForm } from '../courtreserve';
 import { LockManager } from './lock-manager';
 import { PreparedJob, JobResult, BookingAttempt, JobWithAccount } from './types';
 import {
@@ -259,7 +259,7 @@ export class NoonModeHandler {
       }
     }
 
-    const prefetchDuration = Date.now() - prefetchStartTime;
+    const courtPrefetchDuration = Date.now() - prefetchStartTime;
     const totalCourts = Array.from(courtAvailability.values()).reduce((sum, ids) => sum + ids.length, 0);
 
     log.info('Court availability pre-fetched', {
@@ -267,10 +267,73 @@ export class NoonModeHandler {
       targetDate,
       slotsWithCourts: Array.from(courtAvailability.entries()).filter(([, ids]) => ids.length > 0).length,
       totalCourts,
-      prefetchDurationMs: prefetchDuration,
+      prefetchDurationMs: courtPrefetchDuration,
     });
 
-    // Store prepared job with pre-fetched court availability
+    // Pre-fetch booking forms for each court/time/duration combo IN PARALLEL
+    // This is the key optimization - we fetch all forms now so at noon we only POST
+    const preFetchedForms = new Map<string, PreFetchedForm>();
+    const formFetchStartTime = Date.now();
+
+    // Collect all form fetch promises
+    const formFetchPromises: Promise<{ key: string; form: PreFetchedForm | null }>[] = [];
+
+    for (const duration of durations) {
+      for (const timeSlot of timeSlots) {
+        const availabilityKey = `${timeSlot}-${duration}`;
+        const courtIds = courtAvailability.get(availabilityKey) || [];
+
+        for (const courtId of courtIds) {
+          const formKey = `${timeSlot}-${duration}-${courtId}`;
+          formFetchPromises.push(
+            client
+              .prefetchBookingForm(targetDate, timeSlot, duration, courtId)
+              .then((form) => ({ key: formKey, form }))
+              .catch((error) => {
+                log.warn('Failed to pre-fetch booking form', {
+                  jobName: job.name,
+                  timeSlot,
+                  duration,
+                  courtId,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+                return { key: formKey, form: null };
+              })
+          );
+        }
+      }
+    }
+
+    log.info('Pre-fetching booking forms in parallel', {
+      jobName: job.name,
+      targetDate,
+      formCount: formFetchPromises.length,
+    });
+
+    // Wait for all form fetches to complete
+    const formResults = await Promise.all(formFetchPromises);
+    for (const { key, form } of formResults) {
+      if (form) {
+        preFetchedForms.set(key, form);
+      }
+    }
+
+    const formFetchDuration = Date.now() - formFetchStartTime;
+    const successfulFormFetches = preFetchedForms.size;
+    const failedFormFetches = formFetchPromises.length - successfulFormFetches;
+
+    log.info('Booking forms pre-fetched', {
+      jobName: job.name,
+      targetDate,
+      successfulForms: successfulFormFetches,
+      failedForms: failedFormFetches,
+      totalForms: formFetchPromises.length,
+      formFetchDurationMs: formFetchDuration,
+    });
+
+    const totalPrefetchDuration = Date.now() - prefetchStartTime;
+
+    // Store prepared job with pre-fetched court availability AND forms
     this.preparedJobs.set(job.id, {
       job,
       client,
@@ -278,6 +341,7 @@ export class NoonModeHandler {
       timeSlots,
       durations,
       courtAvailability,
+      preFetchedForms,
     });
 
     log.debug('Job prepared and stored', {
@@ -287,6 +351,8 @@ export class NoonModeHandler {
       slotsCount: timeSlots.length,
       durationsCount: durations.length,
       courtAvailabilityKeys: Array.from(courtAvailability.keys()),
+      preFetchedFormCount: preFetchedForms.size,
+      totalPrefetchDurationMs: totalPrefetchDuration,
     });
   }
 
@@ -473,18 +539,37 @@ export class NoonModeHandler {
         };
       }
 
+      // Helper to book with pre-fetched form or fallback to slow path
+      const bookWithForm = async (
+        timeSlot: string,
+        duration: number,
+        courtId: number
+      ) => {
+        const formKey = `${timeSlot}-${duration}-${courtId}`;
+        const preFetchedForm = prepared.preFetchedForms.get(formKey);
+        const bookingParams = {
+          date: prepared.targetDate,
+          startTime: timeSlot,
+          duration,
+          courtId,
+        };
+
+        if (preFetchedForm) {
+          log.trace('Using pre-fetched form (fast path)', { formKey, courtId });
+          return await prepared.client.bookCourtWithPrefetchedForm(bookingParams, preFetchedForm);
+        } else {
+          log.warn('No pre-fetched form available, using slow path', { formKey, courtId });
+          return await prepared.client.bookCourt(bookingParams);
+        }
+      };
+
       // Phase 1: Wait for booking window to open by retrying first court
       let windowOpen = false;
       let windowRetryCount = 0;
       const windowStartTime = Date.now();
 
       while (!windowOpen && (Date.now() - windowStartTime) < MAX_WINDOW_RETRY_MS) {
-        const result = await prepared.client.bookCourt({
-          date: prepared.targetDate,
-          startTime: firstTimeSlot,
-          duration: firstDuration,
-          courtId: firstCourtId,
-        });
+        const result = await bookWithForm(firstTimeSlot, firstDuration, firstCourtId);
 
         attempts.push({
           date: prepared.targetDate,
@@ -577,12 +662,7 @@ export class NoonModeHandler {
             );
             if (alreadyTried) continue;
 
-            const result = await prepared.client.bookCourt({
-              date: prepared.targetDate,
-              startTime: timeSlot,
-              duration,
-              courtId,
-            });
+            const result = await bookWithForm(timeSlot, duration, courtId);
 
             attempts.push({
               date: prepared.targetDate,

@@ -69,6 +69,18 @@ export interface CancelReservationResponse {
   [key: string]: any;
 }
 
+/**
+ * Pre-fetched form data for fast booking at noon
+ * Fetched during prep phase (11:59) to avoid form-fetching latency at noon
+ */
+export interface PreFetchedForm {
+  formData: ReservationFormData;
+  timeSlot: string;      // e.g., "18:00"
+  duration: number;      // e.g., 120
+  courtId: number;       // e.g., 52039
+  fetchedAt: Date;       // When this was fetched (for staleness checks)
+}
+
 export const VENUES: Record<string, VenueConfig> = {
   sunnyvale: {
     name: 'Sunnyvale',
